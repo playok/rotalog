@@ -26,6 +26,34 @@ ErrorLog  "|/usr/local/bin/rotalog /var/log/httpd/error.log 100M"
 
 ## Build and Install
 
+GitHub Releases on `v<version>` tags include OS/CPU archives and SHA-256 checksums:
+
+| Platform | Archive target |
+|---|---|
+| Linux x86_64 | `x86_64-unknown-linux-musl` |
+| Linux ARM64 | `aarch64-unknown-linux-musl` |
+| macOS Intel (11+) | `x86_64-apple-darwin` |
+| macOS Apple Silicon (11+) | `aarch64-apple-darwin` |
+
+Linux builds use static musl linkage to avoid a glibc version dependency; this
+is not certification of every Linux distribution/version. Windows binaries are
+not currently provided. Archives contain `rotalog`, the license and READMEs.
+
+```sh
+# Download the matching archive and checksum from GitHub Releases first.
+shasum -a 256 -c rotalog-v0.1.0-x86_64-unknown-linux-musl.tar.gz.sha256
+tar -xzf rotalog-v0.1.0-x86_64-unknown-linux-musl.tar.gz
+sudo install -m 0755 rotalog /usr/local/bin/rotalog
+```
+
+Maintainers: push a `v<version>` tag matching `Cargo.toml`. The workflow tests,
+builds and verifies all four targets before attaching them to a GitHub Release.
+PRs and manual runs only validate builds and upload Actions artifacts. Portable
+release settings are used, without `target-cpu=native`. crates.io publishing
+requires the existing token and only runs for non-prerelease tags.
+
+To build from source:
+
 ```sh
 cargo build --release
 # target/release/rotalog

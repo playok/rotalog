@@ -1,3 +1,5 @@
 /target
 /attic
 .DS_Store
+
+/dist

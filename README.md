@@ -41,6 +41,34 @@ ErrorLog  "|/usr/local/bin/rotalog /var/log/httpd/error.log 100M"
 
 ## 빌드와 설치
 
+GitHub Releases의 `v<버전>` 태그에서 OS/CPU별 빌드와 SHA-256 체크섬을 제공합니다.
+
+| 플랫폼 | 릴리즈 파일의 target |
+|---|---|
+| Linux x86_64 | `x86_64-unknown-linux-musl` |
+| Linux ARM64 | `aarch64-unknown-linux-musl` |
+| macOS Intel (11 이상) | `x86_64-apple-darwin` |
+| macOS Apple Silicon (11 이상) | `aarch64-apple-darwin` |
+
+Linux 빌드는 musl 정적 링크로 glibc 버전 의존성을 제거합니다. 개별 Linux 배포판/버전의
+동작을 모두 인증하는 것은 아닙니다. Windows 바이너리는 현재 제공하지 않습니다.
+압축 파일 안에는 `rotalog`, 라이선스와 README가 들어 있습니다.
+
+```sh
+# OS/CPU에 맞는 파일과 .sha256을 GitHub Releases에서 내려받은 후:
+shasum -a 256 -c rotalog-v0.1.0-x86_64-unknown-linux-musl.tar.gz.sha256
+tar -xzf rotalog-v0.1.0-x86_64-unknown-linux-musl.tar.gz
+sudo install -m 0755 rotalog /usr/local/bin/rotalog
+```
+
+릴리즈 관리: `Cargo.toml` 버전과 일치하는 `v<버전>` 태그를 push하면 네 target의
+테스트·release 빌드·체크섬 검증 후 GitHub Release에 바이너리를 첨부합니다.
+PR과 수동 실행에서는 빌드 검증 및 Actions artifact만 생성합니다.
+배포 빌드는 기존 portable release 프로파일을 사용하며 `target-cpu=native`는 사용하지 않습니다.
+crates.io 게시는 기존 `CARGO_REGISTRY_TOKEN` 설정이 있는 정식 버전에서만 수행합니다.
+
+소스에서 직접 빌드하려면:
+
 ```sh
 cargo build --release
 # 결과: target/release/rotalog
