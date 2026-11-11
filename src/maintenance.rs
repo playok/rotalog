@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Sender, TrySendError, bounded, unbounded};
 use flate2::Compression;
@@ -21,6 +22,7 @@ const MAINTENANCE_QUEUE_DEPTH: usize = 16;
 
 /// Shared buffer size for compression input and output.
 const COMPRESSION_BUFFER_SIZE: usize = 128 * 1024;
+const QUEUE_WARNING_INTERVAL: Duration = Duration::from_secs(5);
 
 struct Job {
     sequence: u64,
@@ -41,6 +43,8 @@ struct Completed {
 pub struct Maintenance {
     sender: Option<Sender<Job>>,
     sequence: Mutex<u64>,
+    dropped_jobs: AtomicU64,
+    last_full_warning: Mutex<Option<Instant>>,
     workers: Vec<JoinHandle<()>>,
     retention: Option<JoinHandle<()>>,
 }
@@ -138,6 +142,8 @@ impl Maintenance {
         Ok(Self {
             sender: Some(sender),
             sequence: Mutex::new(0),
+            dropped_jobs: AtomicU64::new(0),
+            last_full_warning: Mutex::new(None),
             workers,
             retention: Some(retention),
         })
@@ -161,9 +167,19 @@ impl Maintenance {
                 *sequence = sequence.saturating_add(1);
             }
             Err(TrySendError::Full(_)) => {
-                eprintln!(
-                    "rotalog: maintenance queue is full; leaving a rotated file uncompressed"
-                );
+                let dropped = self.dropped_jobs.fetch_add(1, Ordering::Relaxed) + 1;
+                let now = Instant::now();
+                let mut last = match self.last_full_warning.lock() {
+                    Ok(last) => last,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                if last.is_none_or(|last| now.duration_since(last) >= QUEUE_WARNING_INTERVAL) {
+                    eprintln!(
+                        "rotalog: maintenance queue is full; leaving a rotated file \
+                         uncompressed (total dropped: {dropped})"
+                    );
+                    *last = Some(now);
+                }
             }
             Err(TrySendError::Disconnected(_)) => {
                 eprintln!("rotalog: maintenance workers stopped; rotated file was not queued");
@@ -177,6 +193,13 @@ impl Maintenance {
     }
 
     fn stop(&mut self) {
+        let dropped = self.dropped_jobs.load(Ordering::Relaxed);
+        if dropped > 0 {
+            eprintln!(
+                "rotalog: {dropped} rotated files were not compressed/retained because \
+                 the maintenance queue was full"
+            );
+        }
         // Dropping the sender closes the job queue. Workers drain the queued
         // jobs and exit; their completed senders then close the coordinator.
         self.sender.take();
