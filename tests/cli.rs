@@ -495,7 +495,7 @@ fn accepts_time_and_size_together() {
 #[cfg(target_os = "linux")]
 #[test]
 fn write_failure_exits_with_status_2() {
-    let output = run(&["/dev/full", "86400"], b"this cannot be written\n");
+    let output = run(&["-t", "/dev/full", "86400"], b"this cannot be written\n");
     assert_eq!(output.status.code(), Some(2));
     assert!(
         stderr(&output).contains("write to logfile /dev/full"),
