@@ -6,11 +6,13 @@ on:
     paths:
       - .github/workflows/release.yml
       - scripts/package-release.py
+      - tests/test_package_release.py
     tags: ["v*"]
   pull_request:
     paths:
       - .github/workflows/release.yml
       - scripts/package-release.py
+      - tests/test_package_release.py
   workflow_dispatch:
 
 permissions:
@@ -74,6 +76,8 @@ jobs:
             echo 'Linux release must not depend on a dynamic loader or shared libraries' >&2
             exit 1
           fi
+      - name: Test package layout for all targets
+        run: python3 -m unittest discover -s tests -p test_package_release.py
       - name: Package and checksum
         run: python3 scripts/package-release.py --version "$RELEASE_VERSION" --target ${{ matrix.target }}
       - uses: actions/upload-artifact@v4

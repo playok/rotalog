@@ -11,7 +11,7 @@ parser.add_argument('--version', required=True)
 parser.add_argument('--target', required=True)
 args = parser.parse_args()
 for value in [args.version, args.target]:
-    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.+-]*', value):
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.+-]*', value):
         parser.error('version and target must be filename-safe identifiers')
 binary = pathlib.Path('target') / args.target / 'release' / 'rotalog'
 if not binary.is_file():
