@@ -173,6 +173,14 @@ Rotation-heavy micro-optimizations in the current implementation:
 time, so buffer pooling is deferred unless a line-sized workload proves it
 necessary.
 
+## Release profile
+
+`lto = "thin"` vs `lto = "fat"` was compared on the 64 B real-file write
+benchmark: ~1.44 µs vs ~1.42 µs, with p ≈ 0.58 (not significant). The project
+keeps thin LTO for faster builds and simpler cross-platform output.
+`target-cpu=native` is intentionally not a default because it reduces binary
+portability; use it only for local experiments.
+
 ## Benchmarking policy
 
 - Add or update a benchmark for every performance-sensitive change.
