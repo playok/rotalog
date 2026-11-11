@@ -317,6 +317,43 @@ pub fn unique_path_after(base: &Path, start: u64) -> (PathBuf, u64) {
     }
 }
 
+/// Return the next numeric suffix for `base` by scanning its directory once.
+///
+/// This is used on the first size rotation after a restart (or when the base
+/// name changes) so a process with thousands of existing archives does not have
+/// to stat every `.1`..`.N` candidate.
+pub fn next_suffix(base: &Path) -> u64 {
+    let Some(name) = base.file_name().and_then(|name| name.to_str()) else {
+        return 1;
+    };
+    let parent = base
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let prefix = format!("{name}.");
+    let mut max = 0_u64;
+
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return 1;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        let Some(rest) = file_name.strip_prefix(&prefix) else {
+            continue;
+        };
+        if !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()) {
+            if let Ok(number) = rest.parse::<u64>() {
+                max = max.max(number);
+            }
+        }
+    }
+
+    max.saturating_add(1)
+}
+
 fn occupied(path: &Path) -> bool {
     // symlink_metadata also catches dangling symlinks, which `exists` misses.
     std::fs::symlink_metadata(path).is_ok()
@@ -495,6 +532,18 @@ mod tests {
         std::fs::write(&base, b"current").unwrap();
         std::fs::write(dir.path().join("access.log.1"), b"old").unwrap();
         assert_eq!(unique_path(&base), dir.path().join("access.log.2"));
+    }
+
+    #[test]
+    fn next_suffix_scans_existing_archives() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("access.log");
+        for suffix in [".1", ".3", ".10", ".not-a-number"] {
+            std::fs::write(append_suffix(&base, suffix), b"x").unwrap();
+        }
+        std::fs::write(dir.path().join("other.log.99"), b"x").unwrap();
+
+        assert_eq!(next_suffix(&base), 11);
     }
 
     #[test]

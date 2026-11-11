@@ -408,7 +408,10 @@ impl Writer {
                 Some(base) if base == path.as_path() => {
                     naming::unique_path_after(&path, self.size_next)
                 }
-                _ => naming::unique_path_from(&path, 1),
+                _ => {
+                    let start = naming::next_suffix(&path);
+                    naming::unique_path_from(&path, start)
+                }
             };
             self.size_base = Some(path);
             self.size_next = next;
