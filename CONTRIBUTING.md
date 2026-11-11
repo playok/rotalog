@@ -12,6 +12,8 @@ cargo build
 cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all --check
+cargo bench --bench writer
+scripts/bench.sh   # end-to-end; requires hyperfine
 ```
 
 ## CLI Compatibility Tests
