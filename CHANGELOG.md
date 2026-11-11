@@ -13,6 +13,7 @@ and this project follows [Semantic Versioning](https://semver.org/).
 - `--compress-jobs <N>` for parallel compression workers; default 1.
 - `--fsync-archives <always|data|never>` for archive durability/throughput;
   default `always`.
+- `--echo-flush <immediate|buffered>` for echo batching; default `immediate`.
 - 128 KiB compression buffers and a manual copy loop.
 - Bounded maintenance queue with explicit queue-full behavior.
 - Single post-rotate reaper thread.

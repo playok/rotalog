@@ -183,6 +183,25 @@ fn echo_copies_the_stream_to_stdout() {
     assert_eq!(output.stdout, b"copy me\n");
 }
 
+#[test]
+fn buffered_echo_copies_the_stream_to_stdout() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let log = directory.path().join("access.log");
+
+    let output = run(
+        &[
+            "-e",
+            "--echo-flush",
+            "buffered",
+            log.to_str().unwrap(),
+            "86400",
+        ],
+        b"copy me too\n",
+    );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(output.stdout, b"copy me too\n");
+}
+
 #[cfg(unix)]
 #[test]
 fn link_option_points_at_the_current_log() {

@@ -67,6 +67,7 @@ rotalog [OPTIONS] <logfile> <rotationtime|filesize> [<filesize>] [<offset>]
 | `-t`, `--truncate` | Truncate the same path instead of rotating |
 | `-T`, `--truncate-rotated` | Truncate re-opened rotated targets |
 | `-e`, `--echo` | Also copy the stream to stdout |
+| `--echo-flush <immediate\|buffered>` | Echo flush policy; default `immediate` |
 | `-c`, `--create-empty` | Create empty files on each time interval |
 | `-n`, `--circular <count>` | Use `base`, `base.1`, ... `base.(count-1)` |
 | `-v`, `--verbose` | Print configuration and file operations to stderr |
@@ -113,7 +114,8 @@ speed and 6-9 for smaller archives. `--compress-jobs` also requires `-z` and
 defaults to 1; increase it on multi-core hosts when compression lags rotation.
 `--fsync-archives` also requires `-z`: `always` (default) uses `sync_all`,
 `data` uses `sync_data`, and `never` skips fsync at the cost of crash
-durability.
+durability. `--echo-flush` requires `-e`; `immediate` (default) flushes each
+write, while `buffered` batches up to 64 KiB or 100 ms.
 
 ## Performance Benchmarks
 
@@ -135,8 +137,9 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-- 72 unit tests
-- 21 integration tests (including one Linux-only write-failure test)
+- 74 unit tests
+- 22 integration tests on Linux (21 on macOS, including one Linux-only
+  write-failure test)
 - 5 differential compatibility tests (51-case argv matrix plus malformed,
   extension, oracle-identity, and behavior checks)
 

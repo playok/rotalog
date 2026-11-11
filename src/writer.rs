@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::config::Config;
+use crate::config::{Config, EchoFlush};
 use crate::error::{Error, IoContext, Result};
 use crate::link;
 use crate::maintenance::Maintenance;
@@ -12,6 +12,8 @@ use crate::program;
 
 /// How long to keep writing to the old file if opening a new one fails.
 const ROTATION_RETRY_DELAY: Duration = Duration::from_secs(5);
+const ECHO_BUFFER_SIZE: usize = 64 * 1024;
+const ECHO_FLUSH_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reason {
@@ -45,6 +47,14 @@ impl std::fmt::Debug for CurrentFile {
     }
 }
 
+#[derive(Debug)]
+struct EchoState {
+    enabled: bool,
+    buffered: bool,
+    buffer: Vec<u8>,
+    last_flush: Instant,
+}
+
 /// The rotating writer itself. All methods take the current UTC timestamp so
 /// rotation can be tested deterministically without sleeping.
 #[derive(Debug)]
@@ -61,7 +71,7 @@ pub struct Writer {
     empty_next: Option<i64>,
     retry_after: Option<Instant>,
     maintenance: Option<Maintenance>,
-    echo_enabled: bool,
+    echo: EchoState,
 }
 
 impl Writer {
@@ -83,6 +93,7 @@ impl Writer {
         } else {
             None
         };
+        let buffered = cfg.effective_echo_flush() == EchoFlush::Buffered;
 
         Ok(Self {
             cfg,
@@ -95,7 +106,12 @@ impl Writer {
             empty_next: None,
             retry_after: None,
             maintenance,
-            echo_enabled: true,
+            echo: EchoState {
+                enabled: true,
+                buffered,
+                buffer: Vec::with_capacity(ECHO_BUFFER_SIZE),
+                last_flush: Instant::now(),
+            },
         })
     }
 
@@ -128,7 +144,7 @@ impl Writer {
         }
 
         if self.cfg.echo {
-            self.echo(data);
+            self.echo_write(data);
         }
         Ok(())
     }
@@ -139,6 +155,7 @@ impl Writer {
     /// empty file, then follows the normal interval boundaries. We mirror that
     /// with `empty_next` instead of opening the current interval immediately.
     pub fn tick(&mut self, now_utc: i64) -> Result<()> {
+        self.flush_echo_if_due();
         if !self.cfg.create_empty {
             return Ok(());
         }
@@ -167,6 +184,7 @@ impl Writer {
 
     /// Flush and close the current file, then let maintenance finish.
     pub fn finish(&mut self) -> Result<()> {
+        self.flush_echo();
         let flush_result = match self.current.take() {
             Some(mut current) => current
                 .file
@@ -233,6 +251,7 @@ impl Writer {
     }
 
     fn rotate(&mut self, reason: Reason, now_utc: i64) -> Result<()> {
+        self.flush_echo();
         let previous = self.current.as_ref().map(|current| current.path.clone());
         let initial = previous.is_none();
 
@@ -409,14 +428,62 @@ impl Writer {
         }
     }
 
-    fn echo(&mut self, data: &[u8]) {
-        if !self.echo_enabled {
+    fn echo_write(&mut self, data: &[u8]) {
+        if !self.echo.enabled {
+            return;
+        }
+        if !self.echo.buffered {
+            self.write_echo_now(data);
             return;
         }
 
+        if self.echo.buffer.is_empty() {
+            self.echo.last_flush = Instant::now();
+        }
+        self.echo.buffer.extend_from_slice(data);
+        if self.echo.buffer.len() >= ECHO_BUFFER_SIZE
+            || self.echo.last_flush.elapsed() >= ECHO_FLUSH_INTERVAL
+        {
+            self.flush_echo();
+        }
+    }
+
+    fn flush_echo_if_due(&mut self) {
+        if !self.echo.enabled || !self.echo.buffered || self.echo.buffer.is_empty() {
+            return;
+        }
+        if self.echo.last_flush.elapsed() >= ECHO_FLUSH_INTERVAL {
+            self.flush_echo();
+        }
+    }
+
+    fn flush_echo(&mut self) {
+        if !self.echo.enabled || self.echo.buffer.is_empty() {
+            return;
+        }
+        let mut stdout = io::stdout().lock();
+        match stdout
+            .write_all(&self.echo.buffer)
+            .and_then(|()| stdout.flush())
+        {
+            Ok(()) => {
+                self.echo.buffer.clear();
+                self.echo.last_flush = Instant::now();
+            }
+            Err(error) => {
+                self.echo.enabled = false;
+                self.echo.buffer.clear();
+                if error.kind() != io::ErrorKind::BrokenPipe {
+                    eprintln!("rotalog: could not echo to stdout: {error}");
+                }
+            }
+        }
+    }
+
+    fn write_echo_now(&mut self, data: &[u8]) {
         let mut stdout = io::stdout().lock();
         if let Err(error) = stdout.write_all(data).and_then(|()| stdout.flush()) {
-            self.echo_enabled = false;
+            self.echo.enabled = false;
             if error.kind() != io::ErrorKind::BrokenPipe {
                 eprintln!("rotalog: could not echo to stdout: {error}");
             }
@@ -426,6 +493,7 @@ impl Writer {
 
 impl Drop for Writer {
     fn drop(&mut self) {
+        self.flush_echo();
         if let Some(mut current) = self.current.take() {
             let _ = current.file.flush();
         }

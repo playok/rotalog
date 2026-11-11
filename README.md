@@ -81,6 +81,7 @@ rotalog [OPTIONS] <logfile> <rotationtime|filesize> [<filesize>] [<offset>]
 | `-t`, `--truncate` | 회전 대신 같은 경로를 truncate. 패턴의 `%` 확장은 유지 |
 | `-T`, `--truncate-rotated` | 최초 파일을 제외하고, 열리는 회전 대상 파일을 truncate |
 | `-e`, `--echo` | 로그를 stdout으로도 복사 |
+| `--echo-flush <immediate\|buffered>` | echo flush 정책. 기본 `immediate` |
 | `-c`, `--create-empty` | 입력이 없어도 시간 구간마다 빈 파일 생성 |
 | `-n`, `--circular <count>` | `base`, `base.1`, … `base.(count-1)` 순환 이름 사용 |
 | `-v`, `--verbose` | 설정과 파일 열기/회전/링크 동작을 stderr에 출력 |
@@ -111,6 +112,8 @@ rotalog [OPTIONS] <logfile> <rotationtime|filesize> [<filesize>] [<offset>]
 - `--fsync-archives`는 `-z`와 함께만 사용할 수 있습니다. `always`(기본)는
   `sync_all`, `data`는 `sync_data`, `never`는 fsync를 생략합니다. `data`/`never`는
   크래시·전원 손실 시 아카이브 durability 보장이 약해집니다.
+- `--echo-flush`는 `-e`와 함께만 사용할 수 있습니다. `immediate`(기본)는 chunk마다
+  flush하고, `buffered`는 최대 64 KiB 또는 100 ms 단위로 모아서 flush합니다.
 - `-c`는 시간 간격이 있을 때만 효과가 있습니다. 크기 전용 구성에서도 원본처럼
   옵션은 허용되지만 빈 파일을 만들지 않습니다. 첫 빈 파일은 시작 후 한 interval이
   지난 뒤부터 생성됩니다.
@@ -325,11 +328,11 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-- 단위 테스트 72개: CLI 파싱, 시간 정렬, strftime 검증, 이름 충돌, `-n`/`-t`/`-T`,
+- 단위 테스트 74개: CLI 파싱, 시간 정렬, strftime 검증, 이름 충돌, `-n`/`-t`/`-T`,
   링크, gzip, 보존 정책, DST 경계, 압축 레벨/fsync/worker pool.
-- 통합 테스트 21개 (Linux 전용 write-failure 테스트 1개 포함): 실제 바이너리에
-  stdin을 공급해 파일 생성, 크기/시간 회전, `-e`, `-L`, `-p`, `-D`, `-f`, `-c`,
-  `-z`/`--retain`, 잘못된 설정, SIGTERM 우아한 종료.
+- 통합 테스트 22개 (Linux 기준, macOS 21): 실제 바이너리에 stdin을 공급해 파일 생성,
+  크기/시간 회전, `-e`, `-L`, `-p`, `-D`, `-f`, `-c`, `-z`/`--retain`, 잘못된 설정,
+  SIGTERM 우아한 종료.
 - 원본 CLI 호환성 테스트 5개: 실제 Apache `rotatelogs`와 설정·종료 코드·파일 동작 비교.
 
 ## Apache 원본과의 차이 및 제한

@@ -139,6 +139,14 @@ The user time stays roughly constant while wall time drops, confirming that
 compression is parallelized. Real gains depend on available cores, storage, and
 fsync policy.
 
+`--echo-flush buffered` batches stdout writes up to 64 KiB or 100 ms. This can
+reduce syscall overhead for high-rate `-e` pipelines, but adds up to 100 ms of
+downstream latency. The default remains `immediate`.
+
+A 128 MiB smoke run with 5 runs measured ~110 ms for immediate echo vs ~75 ms
+for buffered echo (about 32% faster), with high run-to-run variance. Use
+`scripts/bench.sh` on the target pipeline before changing the default.
+
 ## Benchmarking policy
 
 - Add or update a benchmark for every performance-sensitive change.

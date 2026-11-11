@@ -52,6 +52,8 @@ hyperfine \
     "$BIN '$tmp/plain.log' 86400 < '$tmp/fixture.bin'" \
     --command-name "echo" \
     "$BIN -e '$tmp/echo.log' 86400 < '$tmp/fixture.bin' > /dev/null" \
+    --command-name "echo-buffered" \
+    "$BIN -e --echo-flush buffered '$tmp/echo-buffered.log' 86400 < '$tmp/fixture.bin' > /dev/null" \
     --command-name "rotate-64KiB" \
     "$BIN '$tmp/rotate.log' 64K < '$tmp/fixture.bin'" \
     --command-name "compress-32MiB" \

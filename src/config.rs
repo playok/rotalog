@@ -39,6 +39,25 @@ impl ArchiveFsync {
     }
 }
 
+/// Flush policy for `-e` echo output.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EchoFlush {
+    /// Flush each write immediately (current/default behavior).
+    #[default]
+    Immediate,
+    /// Buffer up to 64 KiB or 100 ms before flushing.
+    Buffered,
+}
+
+impl EchoFlush {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Immediate => "immediate",
+            Self::Buffered => "buffered",
+        }
+    }
+}
+
 /// Rotation limits. Time and size may be combined; whichever is reached first
 /// wins.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -78,6 +97,8 @@ pub struct Config {
     pub verbose: bool,
     /// Echo log data to stdout.
     pub echo: bool,
+    /// Optional echo flush policy. `None` uses [`EchoFlush::Immediate`].
+    pub echo_flush: Option<EchoFlush>,
     /// Create a file for every interval even when no data arrives.
     pub create_empty: bool,
     /// Circular filenames: base, base.1, ... base.(n-1).
@@ -118,6 +139,11 @@ impl Config {
     /// Effective archive fsync policy.
     pub fn effective_archive_fsync(&self) -> ArchiveFsync {
         self.archive_fsync.unwrap_or_default()
+    }
+
+    /// Effective echo flush policy.
+    pub fn effective_echo_flush(&self) -> EchoFlush {
+        self.echo_flush.unwrap_or_default()
     }
 
     /// Check invariants that are independent of argument order.
@@ -203,6 +229,9 @@ impl Config {
         if self.archive_fsync.is_some() && !self.compress {
             return Err(Error::usage("--fsync-archives requires -z/--compress"));
         }
+        if self.echo_flush.is_some() && !self.echo {
+            return Err(Error::usage("--echo-flush requires -e/--echo"));
+        }
         if self.retain.is_some() {
             if self.circular.is_some() {
                 return Err(Error::usage(
@@ -278,6 +307,14 @@ impl Config {
         eprintln!("  truncate rotated:     {}", self.truncate_rotated);
         eprintln!("  create empty:         {}", self.create_empty);
         eprintln!("  echo to stdout:       {}", self.echo);
+        eprintln!(
+            "  echo flush:           {}",
+            if self.echo {
+                self.effective_echo_flush().as_str().to_owned()
+            } else {
+                "n/a".to_owned()
+            }
+        );
         eprintln!(
             "  circular files:       {}",
             self.circular.map_or("none".to_owned(), |n| n.to_string())
@@ -472,6 +509,19 @@ mod tests {
         config.compress = true;
         config.validate().unwrap();
         assert_eq!(config.effective_archive_fsync(), ArchiveFsync::Never);
+    }
+
+    #[test]
+    fn echo_flush_requires_echo_and_defaults_to_immediate() {
+        let mut config = base();
+        assert_eq!(config.effective_echo_flush(), EchoFlush::Immediate);
+
+        config.echo_flush = Some(EchoFlush::Buffered);
+        assert!(config.validate().is_err());
+
+        config.echo = true;
+        config.validate().unwrap();
+        assert_eq!(config.effective_echo_flush(), EchoFlush::Buffered);
     }
 
     #[test]
