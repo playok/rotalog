@@ -69,6 +69,8 @@ pub struct Writer {
     size_next: u64,
     /// First timer deadline for -c when no file is open yet.
     empty_next: Option<i64>,
+    /// Last parent directory created for -D.
+    last_parent: Option<PathBuf>,
     retry_after: Option<Instant>,
     maintenance: Option<Maintenance>,
     echo: EchoState,
@@ -104,6 +106,7 @@ impl Writer {
             size_base: None,
             size_next: 1,
             empty_next: None,
+            last_parent: None,
             retry_after: None,
             maintenance,
             echo: EchoState {
@@ -255,13 +258,13 @@ impl Writer {
         let previous = self.current.as_ref().map(|current| current.path.clone());
         let initial = previous.is_none();
 
-        let offset = self.zone.offset_at(now_utc);
         let period = match self.cfg.rotation.interval_secs {
             Some(interval) => {
                 if reason == Reason::Size && now_utc < self.period_end_utc {
                     // A size rotation in the middle of an interval is named
                     // with the actual rotation time, like Apache rotatelogs,
                     // while keeping the current period end.
+                    let offset = self.zone.offset_at(now_utc);
                     naming::Period {
                         start_utc: now_utc,
                         start_adjusted: now_utc.saturating_add(offset),
@@ -272,12 +275,15 @@ impl Writer {
                     self.zone.period(now_utc, interval)?
                 }
             }
-            None => naming::Period {
-                start_utc: now_utc,
-                start_adjusted: now_utc.saturating_add(offset),
-                offset_seconds: offset,
-                end_utc: 0,
-            },
+            None => {
+                let offset = self.zone.offset_at(now_utc);
+                naming::Period {
+                    start_utc: now_utc,
+                    start_adjusted: now_utc.saturating_add(offset),
+                    offset_seconds: offset,
+                    end_utc: 0,
+                }
+            }
         };
 
         let (path, truncate, next_file_number) = self.plan_target(
@@ -297,7 +303,7 @@ impl Writer {
             );
         }
 
-        let file = open_file(&path, truncate, self.cfg.create_dirs)
+        let file = open_file(&path, truncate, self.cfg.create_dirs, &mut self.last_parent)
             .with_context(|| format!("open logfile {}", path.display()))?;
         let size = if truncate {
             0
@@ -395,11 +401,12 @@ impl Writer {
             // times in one interval. Never append new records to an older
             // archive: pick the next free suffix instead. Keep the next suffix
             // so repeated size rotations do not rescan from .1 every time.
-            let start = match self.size_base.as_deref() {
-                Some(base) if base == path.as_path() => self.size_next,
-                _ => 1,
+            let (unique, next) = match self.size_base.as_deref() {
+                Some(base) if base == path.as_path() => {
+                    naming::unique_path_after(&path, self.size_next)
+                }
+                _ => naming::unique_path_from(&path, 1),
             };
-            let (unique, next) = naming::unique_path_from(&path, start);
             self.size_base = Some(path);
             self.size_next = next;
             path = unique;
@@ -503,10 +510,18 @@ impl Drop for Writer {
     }
 }
 
-fn open_file(path: &Path, truncate: bool, create_dirs: bool) -> io::Result<File> {
+fn open_file(
+    path: &Path,
+    truncate: bool,
+    create_dirs: bool,
+    last_parent: &mut Option<PathBuf>,
+) -> io::Result<File> {
     if create_dirs {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            fs::create_dir_all(parent)?;
+            if last_parent.as_deref() != Some(parent) {
+                fs::create_dir_all(parent)?;
+                *last_parent = Some(parent.to_owned());
+            }
         }
     }
 
