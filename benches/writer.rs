@@ -49,6 +49,28 @@ fn write_chunks(c: &mut Criterion) {
     group.finish();
 }
 
+fn line_sized_file_writes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("writer/line_sized_file");
+    let dir = TempDir::new().unwrap();
+    let config = Config {
+        logfile: dir.path().join("access.log"),
+        rotation: Rotation {
+            interval_secs: Some(86_400),
+            size_bytes: None,
+        },
+        ..Config::default()
+    };
+    let mut writer = Writer::new(config).unwrap();
+    writer.open_initial(T0).unwrap();
+    let data = vec![b'x'; 64];
+    group.throughput(Throughput::Bytes(data.len() as u64));
+    group.bench_function("64B", |b| {
+        b.iter(|| writer.write(black_box(data.as_slice()), T0).unwrap());
+    });
+    group.finish();
+    black_box(dir);
+}
+
 fn size_rotations(c: &mut Criterion) {
     let mut group = c.benchmark_group("writer/size_rotation");
     group.sample_size(10);
@@ -92,5 +114,10 @@ fn size_rotations(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, write_chunks, size_rotations);
+criterion_group!(
+    benches,
+    write_chunks,
+    line_sized_file_writes,
+    size_rotations
+);
 criterion_main!(benches);

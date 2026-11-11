@@ -73,14 +73,20 @@ an example, not a guarantee.
 | write 1 KiB | ~665 ns | ~1.43 GiB/s |
 | write 64 KiB | ~668 ns | ~91 GiB/s |
 | local-time write 64 KiB | ~668 ns | ~91 GiB/s |
+| line-sized file write 64 B | ~1.39 µs | ~44 MiB/s |
 | size rotation 64 KiB | ~225 µs | ~278 MiB/s |
 | size rotation 1 MiB | ~2.17 ms | ~460 MiB/s |
 | size rotation 64 MiB | ~141 ms | ~455 MiB/s |
 
 Interpretation:
 
-- The per-call overhead is roughly **0.67 µs**; with 64 KiB chunks this is
-  negligible relative to throughput.
+- The per-call overhead is roughly **0.67 µs** for `/dev/null`; with 64 KiB
+  chunks this is negligible relative to throughput.
+- A line-sized 64 B write to a real temporary file costs roughly **1.39 µs**
+  (about 44 MiB/s). File buffering could reduce syscalls, but it would need a
+  flush policy that preserves `tail -F` visibility and rotation semantics.
+  Current decision: keep unbuffered file writes by default and revisit if a
+  real line-sized workload shows a bottleneck.
 - `/dev/null` microbenchmarks show that the basic write path is not the first
   optimization target.
 - Rotation-heavy workloads are dominated by file creation/path/open work, not
