@@ -1,7 +1,9 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-use crate::config::{ArchiveFsync, Config, MAX_COMPRESS_JOBS, MAX_OFFSET_MINUTES, Rotation};
+use crate::config::{
+    ArchiveFsync, Config, EchoFlush, MAX_COMPRESS_JOBS, MAX_OFFSET_MINUTES, Rotation,
+};
 use crate::error::{Error, Result};
 
 pub const HELP: &str = r#"rotalog - rotating log writer for Apache httpd and other pipes
@@ -27,6 +29,8 @@ Rotation and naming:
 
 Data flow and maintenance:
   -e, --echo                Echo log data to stdout as well
+      --echo-flush <immediate|buffered>
+                            Echo flush policy (default immediate)
   -p, --program <path>      Run <path> with the new (and previous) filename
   -D, --create-dirs         Create missing parent directories
   -v, --verbose             Print configuration and file operations on stderr
@@ -147,6 +151,10 @@ where
             "truncate-rotated" => self.set_flag(name, inline, |cfg| cfg.truncate_rotated = true)?,
             "verbose" => self.set_flag(name, inline, |cfg| cfg.verbose = true)?,
             "echo" => self.set_flag(name, inline, |cfg| cfg.echo = true)?,
+            "echo-flush" => {
+                let value = self.take_value("--echo-flush", inline)?;
+                self.cfg.echo_flush = Some(parse_echo_flush(&value)?);
+            }
             "create-empty" => self.set_flag(name, inline, |cfg| cfg.create_empty = true)?,
             "compress" => self.set_flag(name, inline, |cfg| cfg.compress = true)?,
             "compress-level" => {
@@ -441,6 +449,16 @@ fn parse_compress_jobs(value: &OsStr) -> Result<usize> {
     Ok(jobs)
 }
 
+fn parse_echo_flush(value: &OsStr) -> Result<EchoFlush> {
+    match value.to_str() {
+        Some("immediate") => Ok(EchoFlush::Immediate),
+        Some("buffered") => Ok(EchoFlush::Buffered),
+        _ => Err(Error::usage(
+            "--echo-flush must be one of: immediate, buffered",
+        )),
+    }
+}
+
 fn is_option(arg: &OsStr) -> bool {
     let bytes = arg.as_encoded_bytes();
     bytes.len() > 1 && bytes[0] == b'-'
@@ -582,6 +600,13 @@ mod tests {
         assert!(parse_args(&["--fsync-archives", "never", "access.log", "60"]).is_err());
         assert!(parse_args(&["-z", "--fsync-archives=never", "access.log", "60"]).is_ok());
         assert!(parse_args(&["-z", "--fsync-archives=sometimes", "access.log", "60"]).is_err());
+    }
+
+    #[test]
+    fn echo_flush_requires_echo_and_valid_value() {
+        assert!(parse_args(&["--echo-flush", "buffered", "access.log", "60"]).is_err());
+        assert!(parse_args(&["-e", "--echo-flush=buffered", "access.log", "60"]).is_ok());
+        assert!(parse_args(&["-e", "--echo-flush=invalid", "access.log", "60"]).is_err());
     }
 
     #[test]
