@@ -1,5 +1,7 @@
 # rotalog
 
+[한국어](README.md) | [English](README.en.md)
+
 Apache rotatelogs와 호환되는 로그 회전 도구를 Rust로 처음부터 다시 구현한
 프로젝트입니다.
 
@@ -97,6 +99,8 @@ rotalog [OPTIONS] <logfile> <rotationtime|filesize> [<filesize>] [<offset>]
 - `-z`는 `-t`, `-T`, `-n`과 함께 쓸 수 없습니다. 같은 이름을 재사용하거나 즉시
   truncate하는 모드에서는 압축 대상이 모호해지기 때문입니다.
 - `--retain`은 `-n`, `-t`, `-T`와 함께 쓸 수 없습니다.
+- `-p`는 `-z`/`--compress`, `--retain`과 함께 쓸 수 없습니다. 이전 파일을 읽는
+  비동기 프로그램과 압축/삭제 작업의 경쟁 조건을 막기 위한 제약입니다.
 - `-c`는 시간 간격이 있을 때만 효과가 있습니다. 크기 전용 구성에서도 원본처럼
   옵션은 허용되지만 빈 파일을 만들지 않습니다. 첫 빈 파일은 시작 후 한 interval이
   지난 뒤부터 생성됩니다.
@@ -109,9 +113,6 @@ rotalog [OPTIONS] <logfile> <rotationtime|filesize> [<filesize>] [<offset>]
 
 추가 주의:
 
-- `-p`와 `-z`/`--retain`을 함께 쓰면, 비동기로 실행된 회전 후 프로그램과 압축/삭제
-  작업이 경쟁할 수 있습니다. 이전 파일을 읽는 스크립트는 파일이 이미 압축되었거나
-  삭제되었을 가능성을 처리해야 합니다.
 - `-p` 프로그램은 rotalog의 stdin/stdout/stderr를 그대로 상속합니다. 원본
   Apache 동작과 같으므로, 프로그램이 stdin에서 읽으면 로그 파이프를 소비할 수 있습니다.
 - `strftime` 패턴의 시간 입도는 회전 간격보다 촘촘해야 합니다. 예를 들어 하루 간격으로
@@ -136,8 +137,10 @@ printf 'hello\n' | rotalog /var/log/access.log 86400
 # /var/log/access.log.1794355200  (하루 경계로 정렬된 시각)
 ```
 
-시간 구간은 Apache와 동일하게 “UTC + 오프셋”을 정수 나눗셈으로 내림 정렬합니다.
-`-l`을 쓰면 실행 시점의 OS 시간대 오프셋을 사용하므로 DST 전환을 따라갑니다.
+시간 구간은 UTC/고정 오프셋에서는 Apache와 동일하게 “UTC + 오프셋”을 정수 나눗셈으로
+내림 정렬합니다. `-l`을 쓰면 로컬 civil time 기준으로 경계를 계산해 DST 전환일에도
+자정·정각 경계를 유지합니다. 이 부분은 Apache의 adjusted-epoch 방식과 DST 전환일에서만
+의도적으로 다릅니다.
 
 크기 제한 때문에 구간 중간에 회전하면, 새 파일 이름에는 구간 시작 시각이 아니라
 **실제 회전 시각**이 들어갑니다. 이때 패턴이 같은 이름을 다시 만들면 `.1`, `.2`가
@@ -179,6 +182,11 @@ access.20261111.log.2
 새 파일 열기에 실패하면 이전 파일을 그대로 유지하고 5초 후 재시도합니다. 링크나
 `-p` 실행 실패는 진단 메시지만 남기고 로깅을 계속합니다.
 
+현재 파일에 대한 write 자체가 실패하면(예: `ENOSPC`, `EIO`) 데이터 일관성을 위해
+진단 메시지와 함께 exit code 2로 종료합니다. 상위 프로세스(httpd/systemd)가 재시작과
+알림을 담당하도록 구성하세요. 부분 쓰기 후 재시도로 중복 데이터를 만들지 않기 위한
+의도적인 정책입니다.
+
 `-c`는 원본과 동일하게 시작 즉시 현재 구간 파일을 만들지 않습니다. 시작 후 한
 interval이 지난 시점부터 빈 파일을 만들고, 이후에는 각 구간 경계를 따릅니다.
 `-f`가 함께 있으면 시작 즉시 파일을 연 뒤 구간마다 회전합니다.
@@ -198,9 +206,12 @@ httpd ──stdin──▶ reader thread ──bounded channel──▶ writer t
 - 리더는 64 KiB씩 읽어 `sync_channel(64)`로 전달합니다. writer가 느리면 자연스럽게
   backpressure가 걸리고 메모리는 약 4 MiB로 제한됩니다.
 - writer만 회전 상태와 파일 핸들을 소유하므로 락이 없습니다.
-- maintenance 스레드는 압축과 삭제를 담당합니다. 종료 시 큐를 모두 비운 뒤 join합니다.
+- maintenance 스레드는 압축과 삭제를 담당합니다. 큐는 16개로 제한되며, 큐가 가득
+  차면 해당 회전 파일은 압축하지 않고 남깁니다. 종료 시에는 큐에 남은 최대 16개
+  작업을 마친 뒤 종료합니다.
 - `SIGTERM`/`SIGINT`는 `signal-hook` 플래그로 전달됩니다. writer는 최대 200 ms 안에
-  이를 확인하고, 큐에 남은 데이터를 기록한 뒤 정상 종료합니다.
+  이를 확인하고, 250 ms grace period 동안 전달 중인 데이터를 흡수한 뒤 정상 종료합니다.
+  OS pipe에 아직 읽히지 않은 데이터는 grace period를 넘기면 보장되지 않습니다.
 
 ## Apache httpd 설정 예
 
@@ -241,7 +252,7 @@ exec /usr/local/bin/post-rotate --tag httpd "$@"
 - oracle이 없으면 테스트는 skip 메시지를 출력하고 성공합니다. 따라서 Apache가 없는
   CI에서도 `cargo test`가 깨지지 않습니다.
 - 검증 규모: 공통 argv 매트릭스 51개, malformed 입력 8개, 확장 옵션 5개,
-  `-n`/`-t`/`-L`/`-e` 동작 비교 3개.
+  동작 비교 3개, oracle identity 1개.
 - 비교 항목:
   - 명령 수용/거부 여부와 종료 코드
   - `-v`가 출력하는 유효 설정(회전 시간·크기·오프셋·로컬 시간·`strftime`·`-f`·
@@ -292,11 +303,12 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-- 단위 테스트 59개: CLI 파싱, 시간 정렬, strftime 검증, 이름 충돌, `-n`/`-t`/`-T`,
-  링크, gzip, 보존 정책.
-- 통합 테스트 19개: 실제 바이너리에 stdin을 공급해 파일 생성, 크기/시간 회전,
-  `-e`, `-L`, `-p`, `-D`, `-f`, `-c`, `-z`/`--retain`, 잘못된 설정, SIGTERM 우아한 종료.
-- 원본 CLI 호환성 테스트 4개: 실제 Apache `rotatelogs`와 설정·종료 코드·파일 동작 비교.
+- 단위 테스트 67개: CLI 파싱, 시간 정렬, strftime 검증, 이름 충돌, `-n`/`-t`/`-T`,
+  링크, gzip, 보존 정책, DST 경계.
+- 통합 테스트 21개 (Linux 전용 write-failure 테스트 1개 포함): 실제 바이너리에
+  stdin을 공급해 파일 생성, 크기/시간 회전, `-e`, `-L`, `-p`, `-D`, `-f`, `-c`,
+  `-z`/`--retain`, 잘못된 설정, SIGTERM 우아한 종료.
+- 원본 CLI 호환성 테스트 5개: 실제 Apache `rotatelogs`와 설정·종료 코드·파일 동작 비교.
 
 ## Apache 원본과의 차이 및 제한
 
@@ -309,6 +321,8 @@ cargo fmt --check
 - 4 GiB를 넘는 `G` 크기와 큰 시간/카운트는 64비트로 정확히 계산합니다. 원본은
   32비트 `unsigned int`/`atoi()` 오버플로가 발생할 수 있습니다.
 - `-h`, `-V`, long option, `-z`, `--retain`은 원본에 없는 확장입니다.
+- `-l`은 DST-aware 로컬 civil time 경계를 사용하므로 DST 전환일에는 Apache와
+  회전 시각이 1시간 다를 수 있습니다.
 - 같은 이름 충돌 시 `.1`, `.2`를 붙여 보존합니다 (원본은 덮어쓸 수 있음).
 - 회전 실패 시 이전 파일에 계속 기록합니다 (원본은 truncate 후 손실 메시지 기록).
 - `-L`은 하드 링크를 우선하되, 불가능하면 심볼릭 링크로 대체합니다.

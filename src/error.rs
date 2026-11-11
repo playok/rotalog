@@ -4,6 +4,7 @@ use std::io;
 
 /// Errors produced while parsing the command line or while rotating logs.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// Invalid command line or configuration.
     Usage(String),

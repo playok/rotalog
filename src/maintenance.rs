@@ -1,12 +1,20 @@
 use std::collections::VecDeque;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Sender};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::thread::{self, JoinHandle};
 
 use flate2::Compression;
 use flate2::write::GzEncoder;
+
+static TEMPORARY_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Bound the number of rotated files waiting for compression. When the queue
+/// is full we leave the file uncompressed instead of blocking the writer or
+/// growing memory without limit.
+const MAINTENANCE_QUEUE_DEPTH: usize = 16;
 
 enum Job {
     Retire(PathBuf),
@@ -18,16 +26,17 @@ enum Job {
 /// Rotations stay cheap: the writer only enqueues the retired path. Gzip work
 /// and deletion happen on this thread, so a multi-gigabyte log never stalls the
 /// pipe from httpd.
+#[derive(Debug)]
 pub struct Maintenance {
-    sender: Option<Sender<Job>>,
+    sender: Option<SyncSender<Job>>,
     handle: Option<JoinHandle<()>>,
 }
 
 impl Maintenance {
     pub fn spawn(compress: bool, retain: Option<usize>, verbose: bool) -> io::Result<Self> {
-        let (sender, receiver) = mpsc::channel::<Job>();
+        let (sender, receiver) = mpsc::sync_channel::<Job>(MAINTENANCE_QUEUE_DEPTH);
         let handle = thread::Builder::new()
-            .name("rotatelogs-maintenance".to_owned())
+            .name("rotalog-maintenance".to_owned())
             .spawn(move || {
                 let mut kept: VecDeque<PathBuf> = VecDeque::new();
 
@@ -85,8 +94,16 @@ impl Maintenance {
     /// Queue a file for compression and/or retention.
     pub fn retire(&self, path: PathBuf) {
         if let Some(sender) = &self.sender {
-            if sender.send(Job::Retire(path)).is_err() {
-                eprintln!("rotalog: maintenance worker stopped; rotated file was not queued");
+            match sender.try_send(Job::Retire(path)) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    eprintln!(
+                        "rotalog: maintenance queue is full; leaving a rotated file uncompressed"
+                    );
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    eprintln!("rotalog: maintenance worker stopped; rotated file was not queued");
+                }
             }
         }
     }
@@ -98,7 +115,10 @@ impl Maintenance {
 
     fn stop(&mut self) {
         if let Some(sender) = self.sender.take() {
-            let _ = sender.send(Job::Shutdown);
+            // The worker drains queued Retire jobs before observing Shutdown.
+            // If the bounded queue is full, dropping the sender lets the
+            // worker drain the queue and then exit on Disconnected.
+            let _ = sender.try_send(Job::Shutdown);
         }
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
@@ -114,12 +134,11 @@ impl Drop for Maintenance {
 
 fn compress_file(source: &Path, verbose: bool) -> io::Result<PathBuf> {
     let destination = gzip_path(source);
-    let temporary = gzip_temporary_path(&destination);
+    let (temporary, output) = open_temporary(&destination)?;
 
     let result = (|| -> io::Result<()> {
         let input = File::open(source)?;
         let metadata = input.metadata()?;
-        let output = File::create(&temporary)?;
         let mut encoder = GzEncoder::new(BufWriter::new(output), Compression::default());
         io::copy(&mut BufReader::new(input), &mut encoder)?;
         let mut output = encoder.finish()?;
@@ -129,7 +148,18 @@ fn compress_file(source: &Path, verbose: bool) -> io::Result<PathBuf> {
         output.get_ref().sync_all()?;
         drop(output);
 
-        fs::set_permissions(&temporary, metadata.permissions())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = metadata.permissions();
+            permissions.set_mode(permissions.mode() & 0o777);
+            fs::set_permissions(&temporary, permissions)?;
+        }
+        #[cfg(not(unix))]
+        {
+            fs::set_permissions(&temporary, metadata.permissions())?;
+        }
+
         fs::rename(&temporary, &destination)?;
         if let Err(error) = fs::remove_file(source) {
             if error.kind() != io::ErrorKind::NotFound {
@@ -160,6 +190,27 @@ fn compress_file(source: &Path, verbose: bool) -> io::Result<PathBuf> {
     }
 }
 
+/// Open a compression temp file without following symlinks or reusing an
+/// existing path. `create_new` maps to O_CREAT|O_EXCL on Unix.
+fn open_temporary(destination: &Path) -> io::Result<(PathBuf, File)> {
+    for _ in 0..100 {
+        let temporary = gzip_temporary_path(destination);
+        match create_new_file(&temporary) {
+            Ok(file) => return Ok((temporary, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not create a unique compression temporary file",
+    ))
+}
+
+fn create_new_file(path: &Path) -> io::Result<File> {
+    OpenOptions::new().write(true).create_new(true).open(path)
+}
+
 fn gzip_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(".gz");
@@ -168,7 +219,11 @@ fn gzip_path(path: &Path) -> PathBuf {
 
 fn gzip_temporary_path(destination: &Path) -> PathBuf {
     let mut name = destination.as_os_str().to_os_string();
-    name.push(format!(".tmp.{}", std::process::id()));
+    name.push(format!(
+        ".tmp.{}.{}",
+        std::process::id(),
+        TEMPORARY_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
     PathBuf::from(name)
 }
 
@@ -216,5 +271,40 @@ mod tests {
         assert!(!paths[0].exists());
         assert!(paths[1].exists());
         assert!(paths[2].exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compression_temporary_file_does_not_follow_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        let temporary = dir.path().join("archive.gz.tmp.123");
+        fs::write(&victim, b"safe").unwrap();
+        symlink(&victim, &temporary).unwrap();
+
+        let error = create_new_file(&temporary).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&victim).unwrap(), b"safe");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compression_strips_special_permission_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("access.log.1");
+        fs::write(&source, b"hello").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o4755)).unwrap();
+
+        let maintenance = Maintenance::spawn(true, None, false).unwrap();
+        maintenance.retire(source.clone());
+        maintenance.finish();
+
+        let compressed = dir.path().join("access.log.1.gz");
+        let mode = fs::metadata(compressed).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o755);
     }
 }
