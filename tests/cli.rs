@@ -592,3 +592,60 @@ fn stderr_for(child: &mut Child) -> String {
     }
     text
 }
+
+#[test]
+fn bounded_stdin_queue_preserves_large_stream_across_rotations() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("bulk.log");
+    let data: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    let output = run(&[log.to_str().unwrap(), "1M"], &data);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let files = matching_files(dir.path(), "bulk.log");
+    assert!((4..=5).contains(&files.len()));
+    let mut actual = Vec::new();
+    for file in files {
+        let chunk = fs::read(file).unwrap();
+        assert!(chunk.len() <= 1024 * 1024);
+        actual.extend(chunk);
+    }
+    assert_eq!(actual, data);
+}
+
+#[cfg(unix)]
+#[test]
+fn sigterm_with_backpressured_echo_keeps_written_and_echoed_bytes_equal() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("active.log");
+    let input = dir.path().join("input.bin");
+    let data: Vec<u8> = (0..8 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    fs::write(&input, &data).unwrap();
+    let mut child = Command::new(BIN)
+        .args(["-e", log.to_str().unwrap(), "86400"])
+        .stdin(fs::File::open(input).unwrap())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    // Reading only a prefix leaves the echo pipe under backpressure; the input
+    // is much larger than the pipe and queue combined.
+    let mut prefix = vec![0; 1024];
+    stdout.read_exact(&mut prefix).unwrap();
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let reader = thread::spawn(move || {
+        stdout.read_to_end(&mut prefix).unwrap();
+        prefix
+    });
+    assert!(wait_with_timeout(&mut child, Duration::from_secs(5)).success());
+    let echoed = reader.join().unwrap();
+    let files = matching_files(dir.path(), "active.log");
+    assert_eq!(files.len(), 1);
+    assert_eq!(fs::read(&files[0]).unwrap(), echoed);
+    assert!(data.starts_with(&echoed));
+}

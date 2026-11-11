@@ -98,6 +98,11 @@ impl Writer {
         };
         let formatter = cfg.pattern().map(Formatter::new);
         let buffered = cfg.effective_echo_flush() == EchoFlush::Buffered;
+        let echo_capacity = if cfg.echo && buffered {
+            ECHO_BUFFER_SIZE
+        } else {
+            0
+        };
 
         Ok(Self {
             cfg,
@@ -115,7 +120,7 @@ impl Writer {
             echo: EchoState {
                 enabled: true,
                 buffered,
-                buffer: Vec::with_capacity(ECHO_BUFFER_SIZE),
+                buffer: Vec::with_capacity(echo_capacity),
                 last_flush: Instant::now(),
             },
         })
@@ -408,10 +413,7 @@ impl Writer {
                 Some(base) if base == path.as_path() => {
                     naming::unique_path_after(&path, self.size_next)
                 }
-                _ => {
-                    let start = naming::next_suffix(&path);
-                    naming::unique_path_from(&path, start)
-                }
+                _ => naming::unique_path_for_new_base(&path),
             };
             self.size_base = Some(path);
             self.size_next = next;
