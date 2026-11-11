@@ -124,10 +124,12 @@ write, while `buffered` batches up to 64 KiB or 100 ms.
 ```sh
 cargo bench --bench writer
 scripts/bench.sh          # requires hyperfine
+scripts/bench-vs-apache.sh # compare against the original rotatelogs
 ```
 
 - Criterion: `write` 64 B/1 KiB/64 KiB, `-l`, size rotation 64 KiB/1 MiB/64 MiB
 - end-to-end: plain/echo/rotation/compression/local-time
+- Apache comparison methodology and results: `BENCHMARKS.md`
 - Baseline and interpretation: `PERFORMANCE.md`
 - CI compiles benchmarks with `cargo bench --no-run`
 

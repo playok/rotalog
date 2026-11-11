@@ -313,10 +313,12 @@ ROTATELOGS_ORACLE=/usr/sbin/rotatelogs \
 ```sh
 cargo bench --bench writer
 scripts/bench.sh          # hyperfine 필요
+scripts/bench-vs-apache.sh # 실제 Apache rotatelogs와 비교
 ```
 
 - Criterion: `write` 64 B/1 KiB/64 KiB, `-l`, size rotation 64 KiB/1 MiB/64 MiB
 - end-to-end: plain/echo/rotation/compression/local-time
+- Apache 비교 결과와 방법론: `BENCHMARKS.md`
 - baseline과 해석은 `PERFORMANCE.md`에 정리되어 있습니다.
 - CI에서는 `cargo bench --no-run`으로 benchmark compile만 확인합니다.
 
