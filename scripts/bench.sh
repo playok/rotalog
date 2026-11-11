@@ -62,6 +62,10 @@ hyperfine \
     "$BIN -z --compress-level 9 '$tmp/compress9.log' 32M < '$tmp/fixture.bin'" \
     --command-name "compress-32MiB-nofsync" \
     "$BIN -z --fsync-archives never '$tmp/compress-nofsync.log' 32M < '$tmp/fixture.bin'" \
+    --command-name "compress-32MiB-jobs2" \
+    "$BIN -z --compress-jobs 2 '$tmp/compress-jobs2.log' 32M < '$tmp/fixture.bin'" \
+    --command-name "compress-32MiB-jobs4" \
+    "$BIN -z --compress-jobs 4 '$tmp/compress-jobs4.log' 32M < '$tmp/fixture.bin'" \
     --command-name "local" \
     "$BIN -l '$tmp/local.log' 86400 < '$tmp/fixture.bin'" \
     --export-json "$out/results.json" \

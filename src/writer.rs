@@ -75,6 +75,7 @@ impl Writer {
                     cfg.effective_compress_level(),
                     cfg.effective_archive_fsync(),
                     cfg.retain,
+                    cfg.effective_compress_jobs(),
                     cfg.verbose,
                 )
                 .context("start maintenance worker")?,

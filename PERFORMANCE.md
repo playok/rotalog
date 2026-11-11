@@ -121,6 +121,24 @@ A local smoke run on a 64 MiB mixed log with 32 MiB rotation showed roughly
 about 0.14 s. This illustrates that fsync can dominate wall time; it is not a
 substitute for repeated measurements on the target storage.
 
+`--compress-jobs N` controls parallel compression workers (default 1, max 32).
+Increase it when compression lags rotation on a multi-core host. Compression
+still competes with the logger for CPU and I/O; measure with the target log
+volume before choosing a value above 1.
+
+Local smoke run on a 128 MiB mixed log, 32 MiB rotation, level 3, and
+`--fsync-archives never`:
+
+| Jobs | Wall time | User time |
+| ---: | ---: | ---: |
+| 1 | ~0.73 s | ~0.43 s |
+| 2 | ~0.32 s | ~0.42 s |
+| 4 | ~0.22 s | ~0.43 s |
+
+The user time stays roughly constant while wall time drops, confirming that
+compression is parallelized. Real gains depend on available cores, storage, and
+fsync policy.
+
 ## Benchmarking policy
 
 - Add or update a benchmark for every performance-sensitive change.
