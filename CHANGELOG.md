@@ -27,6 +27,7 @@ and this project follows [Semantic Versioning](https://semver.org/).
 - gzip temporary files are created with `create_new` and unpredictable names.
 - The default gzip level for `-z` changed from 6 to 3 for better throughput;
   use `--compress-level 6` or `9` for smaller archives.
+- flate2 now uses the zlib-rs backend for faster compression.
 - `-p`/`--program` is rejected with `-z`/`--compress` and `--retain` to avoid
   post-rotate/compression races.
 - SIGTERM/SIGINT now use a short drain grace period before shutdown.
