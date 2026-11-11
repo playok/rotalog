@@ -1,15 +1,16 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::thread::{self, JoinHandle};
 
+use crossbeam_channel::{Sender, TrySendError, bounded, unbounded};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 
-use crate::config::ArchiveFsync;
+use crate::config::{ArchiveFsync, MAX_COMPRESS_JOBS};
 
 static TEMPORARY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -21,20 +22,27 @@ const MAINTENANCE_QUEUE_DEPTH: usize = 16;
 /// Shared buffer size for compression input and output.
 const COMPRESSION_BUFFER_SIZE: usize = 128 * 1024;
 
-enum Job {
-    Retire(PathBuf),
-    Shutdown,
+struct Job {
+    sequence: u64,
+    path: PathBuf,
 }
 
-/// Background worker for gzip compression and retention.
+struct Completed {
+    sequence: u64,
+    path: PathBuf,
+}
+
+/// Background workers for gzip compression and retention.
 ///
-/// Rotations stay cheap: the writer only enqueues the retired path. Gzip work
-/// and deletion happen on this thread, so a multi-gigabyte log never stalls the
-/// pipe from httpd.
+/// Rotations stay cheap: the writer only enqueues the retired path. Compression
+/// runs on a small worker pool while a coordinator applies retention in
+/// rotation order, even when compression workers finish out of order.
 #[derive(Debug)]
 pub struct Maintenance {
-    sender: Option<SyncSender<Job>>,
-    handle: Option<JoinHandle<()>>,
+    sender: Option<Sender<Job>>,
+    sequence: Mutex<u64>,
+    workers: Vec<JoinHandle<()>>,
+    retention: Option<JoinHandle<()>>,
 }
 
 impl Maintenance {
@@ -43,6 +51,7 @@ impl Maintenance {
         compress_level: u8,
         archive_fsync: ArchiveFsync,
         retain: Option<usize>,
+        compress_jobs: usize,
         verbose: bool,
     ) -> io::Result<Self> {
         if !(1..=9).contains(&compress_level) {
@@ -51,93 +60,130 @@ impl Maintenance {
                 "gzip compression level must be between 1 and 9",
             ));
         }
-        let (sender, receiver) = mpsc::sync_channel::<Job>(MAINTENANCE_QUEUE_DEPTH);
-        let handle = thread::Builder::new()
-            .name("rotalog-maintenance".to_owned())
+        if !(1..=MAX_COMPRESS_JOBS).contains(&compress_jobs) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "compression jobs must be between 1 and 32",
+            ));
+        }
+
+        let (sender, receiver) = bounded::<Job>(MAINTENANCE_QUEUE_DEPTH);
+        let (completed_tx, completed_rx) = unbounded::<Completed>();
+
+        let retention = thread::Builder::new()
+            .name("rotalog-retention".to_owned())
             .spawn(move || {
                 let mut kept: VecDeque<PathBuf> = VecDeque::new();
+                let mut pending: BTreeMap<u64, PathBuf> = BTreeMap::new();
+                let mut next = 0_u64;
 
-                while let Ok(job) = receiver.recv() {
-                    match job {
-                        Job::Retire(path) => {
-                            let final_path = if compress {
-                                match compress_file(&path, compress_level, archive_fsync, verbose) {
-                                    Ok(compressed) => compressed,
-                                    Err(error) => {
-                                        eprintln!(
-                                            "rotalog: could not compress {}: {error}; \
-                                             keeping the uncompressed file",
-                                            path.display()
-                                        );
-                                        path
-                                    }
-                                }
-                            } else {
-                                path
-                            };
-
-                            if let Some(limit) = retain {
-                                kept.push_back(final_path);
-                                while kept.len() > limit {
-                                    if let Some(oldest) = kept.pop_front() {
-                                        if let Err(error) = fs::remove_file(&oldest) {
-                                            if error.kind() != io::ErrorKind::NotFound {
-                                                eprintln!(
-                                                    "rotalog: could not remove retained file {}: {error}",
-                                                    oldest.display()
-                                                );
-                                            }
-                                        } else if verbose {
-                                            eprintln!(
-                                                "rotalog: removed retained file {}",
-                                                oldest.display()
-                                            );
-                                        }
-                                    }
-                                }
-                            }
+                while let Ok(completed) = completed_rx.recv() {
+                    pending.insert(completed.sequence, completed.path);
+                    while let Some(path) = pending.remove(&next) {
+                        if let Some(limit) = retain {
+                            retain_path(&mut kept, path, limit, verbose);
                         }
-                        Job::Shutdown => break,
+                        next = next.saturating_add(1);
                     }
+                }
+
+                if !pending.is_empty() {
+                    eprintln!(
+                        "rotalog: {} compressed files were not retained because a worker stopped",
+                        pending.len()
+                    );
                 }
             })?;
 
+        let mut workers = Vec::with_capacity(compress_jobs);
+        for index in 0..compress_jobs {
+            let receiver = receiver.clone();
+            let completed_tx = completed_tx.clone();
+            let handle = thread::Builder::new()
+                .name(format!("rotalog-compress-{index}"))
+                .spawn(move || {
+                    while let Ok(job) = receiver.recv() {
+                        let final_path = if compress {
+                            match compress_file(&job.path, compress_level, archive_fsync, verbose) {
+                                Ok(compressed) => compressed,
+                                Err(error) => {
+                                    eprintln!(
+                                        "rotalog: could not compress {}: {error}; \
+                                         keeping the uncompressed file",
+                                        job.path.display()
+                                    );
+                                    job.path
+                                }
+                            }
+                        } else {
+                            job.path
+                        };
+
+                        if completed_tx
+                            .send(Completed {
+                                sequence: job.sequence,
+                                path: final_path,
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                })?;
+            workers.push(handle);
+        }
+        drop(completed_tx);
+        drop(receiver);
+
         Ok(Self {
             sender: Some(sender),
-            handle: Some(handle),
+            sequence: Mutex::new(0),
+            workers,
+            retention: Some(retention),
         })
     }
 
     /// Queue a file for compression and/or retention.
     pub fn retire(&self, path: PathBuf) {
-        if let Some(sender) = &self.sender {
-            match sender.try_send(Job::Retire(path)) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => {
-                    eprintln!(
-                        "rotalog: maintenance queue is full; leaving a rotated file uncompressed"
-                    );
-                }
-                Err(TrySendError::Disconnected(_)) => {
-                    eprintln!("rotalog: maintenance worker stopped; rotated file was not queued");
-                }
+        let Some(sender) = &self.sender else {
+            return;
+        };
+        let mut sequence = match self.sequence.lock() {
+            Ok(sequence) => sequence,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        match sender.try_send(Job {
+            sequence: *sequence,
+            path,
+        }) {
+            Ok(()) => {
+                *sequence = sequence.saturating_add(1);
+            }
+            Err(TrySendError::Full(_)) => {
+                eprintln!(
+                    "rotalog: maintenance queue is full; leaving a rotated file uncompressed"
+                );
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                eprintln!("rotalog: maintenance workers stopped; rotated file was not queued");
             }
         }
     }
 
-    /// Drain queued work and wait for the worker. Called during shutdown.
+    /// Drain queued work and wait for all workers. Called during shutdown.
     pub fn finish(mut self) {
         self.stop();
     }
 
     fn stop(&mut self) {
-        if let Some(sender) = self.sender.take() {
-            // The worker drains queued Retire jobs before observing Shutdown.
-            // If the bounded queue is full, dropping the sender lets the
-            // worker drain the queue and then exit on Disconnected.
-            let _ = sender.try_send(Job::Shutdown);
+        // Dropping the sender closes the job queue. Workers drain the queued
+        // jobs and exit; their completed senders then close the coordinator.
+        self.sender.take();
+        for handle in self.workers.drain(..) {
+            let _ = handle.join();
         }
-        if let Some(handle) = self.handle.take() {
+        if let Some(handle) = self.retention.take() {
             let _ = handle.join();
         }
     }
@@ -146,6 +192,24 @@ impl Maintenance {
 impl Drop for Maintenance {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+fn retain_path(kept: &mut VecDeque<PathBuf>, path: PathBuf, limit: usize, verbose: bool) {
+    kept.push_back(path);
+    while kept.len() > limit {
+        if let Some(oldest) = kept.pop_front() {
+            if let Err(error) = fs::remove_file(&oldest) {
+                if error.kind() != io::ErrorKind::NotFound {
+                    eprintln!(
+                        "rotalog: could not remove retained file {}: {error}",
+                        oldest.display()
+                    );
+                }
+            } else if verbose {
+                eprintln!("rotalog: removed retained file {}", oldest.display());
+            }
+        }
     }
 }
 
@@ -278,6 +342,7 @@ mod tests {
             crate::config::DEFAULT_COMPRESS_LEVEL,
             ArchiveFsync::Always,
             None,
+            1,
             false,
         )
         .unwrap();
@@ -310,6 +375,7 @@ mod tests {
             crate::config::DEFAULT_COMPRESS_LEVEL,
             ArchiveFsync::Always,
             Some(2),
+            1,
             false,
         )
         .unwrap();
@@ -354,6 +420,7 @@ mod tests {
             crate::config::DEFAULT_COMPRESS_LEVEL,
             ArchiveFsync::Always,
             None,
+            1,
             false,
         )
         .unwrap();
@@ -363,5 +430,37 @@ mod tests {
         let compressed = dir.path().join("access.log.1.gz");
         let mode = fs::metadata(compressed).unwrap().permissions().mode() & 0o7777;
         assert_eq!(mode, 0o755);
+    }
+
+    #[test]
+    fn parallel_compression_preserves_retention_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths: Vec<_> = (0..4)
+            .map(|index| {
+                let path = dir.path().join(format!("access.log.{index}"));
+                fs::write(&path, vec![b'x'; 1024 + index]).unwrap();
+                path
+            })
+            .collect();
+
+        let maintenance = Maintenance::spawn(
+            true,
+            crate::config::DEFAULT_COMPRESS_LEVEL,
+            ArchiveFsync::Never,
+            Some(2),
+            2,
+            false,
+        )
+        .unwrap();
+        for path in &paths {
+            maintenance.retire(path.clone());
+        }
+        maintenance.finish();
+
+        assert!(!gzip_path(&paths[0]).exists());
+        assert!(!gzip_path(&paths[1]).exists());
+        assert!(gzip_path(&paths[2]).exists());
+        assert!(gzip_path(&paths[3]).exists());
+        assert!(paths.iter().all(|path| !path.exists()));
     }
 }

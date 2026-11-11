@@ -11,6 +11,12 @@ pub const MAX_OFFSET_MINUTES: i32 = 14 * 60;
 /// level 1 is fastest and 6-9 produce smaller archives.
 pub const DEFAULT_COMPRESS_LEVEL: u8 = 3;
 
+/// Default number of parallel compression workers.
+pub const DEFAULT_COMPRESS_JOBS: usize = 1;
+
+/// Upper bound for parallel compression workers.
+pub const MAX_COMPRESS_JOBS: usize = 32;
+
 /// Durability policy for compressed archives before the source file is removed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ArchiveFsync {
@@ -81,6 +87,8 @@ pub struct Config {
     pub compress: bool,
     /// Optional gzip level (1-9). `None` uses [`DEFAULT_COMPRESS_LEVEL`].
     pub compress_level: Option<u8>,
+    /// Optional number of parallel compression workers.
+    pub compress_jobs: Option<usize>,
     /// Optional archive fsync policy. `None` uses [`ArchiveFsync::Always`].
     pub archive_fsync: Option<ArchiveFsync>,
     /// Keep at most this many rotated files created by this process.
@@ -100,6 +108,11 @@ impl Config {
     /// Effective gzip level, including the default when `-z` is enabled.
     pub fn effective_compress_level(&self) -> u8 {
         self.compress_level.unwrap_or(DEFAULT_COMPRESS_LEVEL)
+    }
+
+    /// Effective number of compression workers.
+    pub fn effective_compress_jobs(&self) -> usize {
+        self.compress_jobs.unwrap_or(DEFAULT_COMPRESS_JOBS)
     }
 
     /// Effective archive fsync policy.
@@ -175,6 +188,16 @@ impl Config {
             }
             if !self.compress {
                 return Err(Error::usage("--compress-level requires -z/--compress"));
+            }
+        }
+        if let Some(jobs) = self.compress_jobs {
+            if !(1..=MAX_COMPRESS_JOBS).contains(&jobs) {
+                return Err(Error::usage(format!(
+                    "--compress-jobs must be between 1 and {MAX_COMPRESS_JOBS}"
+                )));
+            }
+            if !self.compress {
+                return Err(Error::usage("--compress-jobs requires -z/--compress"));
             }
         }
         if self.archive_fsync.is_some() && !self.compress {
@@ -264,6 +287,14 @@ impl Config {
             "  compression level:    {}",
             if self.compress {
                 self.effective_compress_level().to_string()
+            } else {
+                "n/a".to_owned()
+            }
+        );
+        eprintln!(
+            "  compression jobs:     {}",
+            if self.compress {
+                self.effective_compress_jobs().to_string()
             } else {
                 "n/a".to_owned()
             }
@@ -420,6 +451,20 @@ mod tests {
 
         config.compress_level = None;
         assert_eq!(config.effective_compress_level(), DEFAULT_COMPRESS_LEVEL);
+
+        config.compress = false;
+        config.compress_jobs = Some(2);
+        assert!(config.validate().is_err());
+        config.compress = true;
+        config.validate().unwrap();
+        assert_eq!(config.effective_compress_jobs(), 2);
+
+        config.compress_jobs = Some(0);
+        assert!(config.validate().is_err());
+        config.compress_jobs = Some(MAX_COMPRESS_JOBS + 1);
+        assert!(config.validate().is_err());
+        config.compress_jobs = None;
+        assert_eq!(config.effective_compress_jobs(), DEFAULT_COMPRESS_JOBS);
 
         config.compress = false;
         config.archive_fsync = Some(ArchiveFsync::Never);

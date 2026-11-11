@@ -93,6 +93,7 @@ rotalog [OPTIONS] <logfile> <rotationtime|filesize> [<filesize>] [<offset>]
 | --- | --- |
 | `-z`, `--compress` | 회전된 파일을 백그라운드에서 gzip 압축 (`*.gz`) |
 | `--compress-level <1-9>` | `-z`의 gzip 레벨. 기본 3 (1=빠름, 6~9=작은 파일) |
+| `--compress-jobs <N>` | `-z`의 병렬 압축 worker 수. 기본 1, 최대 32 |
 | `--fsync-archives <always\|data\|never>` | 압축 아카이브 fsync 정책. 기본 `always` |
 | `--retain <count>` | 이 프로세스가 만든 회전 파일을 최신 `count`개만 남김 |
 
@@ -105,6 +106,8 @@ rotalog [OPTIONS] <logfile> <rotationtime|filesize> [<filesize>] [<offset>]
   비동기 프로그램과 압축/삭제 작업의 경쟁 조건을 막기 위한 제약입니다.
 - `--compress-level`은 `-z`와 함께만 사용할 수 있습니다. 기본값은 3이며, 1은
   가장 빠르고 6~9는 더 작은 아카이브를 만듭니다.
+- `--compress-jobs`는 `-z`와 함께만 사용할 수 있습니다. 기본값은 1이며, 압축
+  worker를 병렬로 실행해 처리량을 높일 수 있습니다 (최대 32).
 - `--fsync-archives`는 `-z`와 함께만 사용할 수 있습니다. `always`(기본)는
   `sync_all`, `data`는 `sync_data`, `never`는 fsync를 생략합니다. `data`/`never`는
   크래시·전원 손실 시 아카이브 durability 보장이 약해집니다.
@@ -205,17 +208,17 @@ httpd ──stdin──▶ reader thread ──bounded channel──▶ writer t
                                                           │
                                                           ├──(-e)──▶ stdout
                                                           │
-                                                          └──retired path──▶ maintenance thread
-                                                                               ├─ gzip
-                                                                               └─ retention delete
+                                                          └──retired path──▶ bounded queue
+                                                                              ├─▶ compress worker 1..N
+                                                                              └─▶ retention coordinator
 ```
 
 - 리더는 64 KiB씩 읽어 `sync_channel(64)`로 전달합니다. writer가 느리면 자연스럽게
   backpressure가 걸리고 메모리는 약 4 MiB로 제한됩니다.
 - writer만 회전 상태와 파일 핸들을 소유하므로 락이 없습니다.
-- maintenance 스레드는 압축과 삭제를 담당합니다. 큐는 16개로 제한되며, 큐가 가득
-  차면 해당 회전 파일은 압축하지 않고 남깁니다. 종료 시에는 큐에 남은 최대 16개
-  작업을 마친 뒤 종료합니다.
+- maintenance worker pool은 압축을 병렬로 처리하고, retention coordinator는 회전
+  순서대로 완료된 아카이브만 삭제합니다. 큐는 16개로 제한되며, 큐가 가득 차면 해당
+  회전 파일은 압축하지 않고 남깁니다. 종료 시에는 큐에 남은 작업을 마친 뒤 종료합니다.
 - `SIGTERM`/`SIGINT`는 `signal-hook` 플래그로 전달됩니다. writer는 최대 200 ms 안에
   이를 확인하고, 250 ms grace period 동안 전달 중인 데이터를 흡수한 뒤 정상 종료합니다.
   OS pipe에 아직 읽히지 않은 데이터는 grace period를 넘기면 보장되지 않습니다.
@@ -322,8 +325,8 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-- 단위 테스트 70개: CLI 파싱, 시간 정렬, strftime 검증, 이름 충돌, `-n`/`-t`/`-T`,
-  링크, gzip, 보존 정책, DST 경계, 압축 레벨/fsync.
+- 단위 테스트 72개: CLI 파싱, 시간 정렬, strftime 검증, 이름 충돌, `-n`/`-t`/`-T`,
+  링크, gzip, 보존 정책, DST 경계, 압축 레벨/fsync/worker pool.
 - 통합 테스트 21개 (Linux 전용 write-failure 테스트 1개 포함): 실제 바이너리에
   stdin을 공급해 파일 생성, 크기/시간 회전, `-e`, `-L`, `-p`, `-D`, `-f`, `-c`,
   `-z`/`--retain`, 잘못된 설정, SIGTERM 우아한 종료.

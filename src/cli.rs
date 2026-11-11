@@ -1,7 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-use crate::config::{ArchiveFsync, Config, MAX_OFFSET_MINUTES, Rotation};
+use crate::config::{ArchiveFsync, Config, MAX_COMPRESS_JOBS, MAX_OFFSET_MINUTES, Rotation};
 use crate::error::{Error, Result};
 
 pub const HELP: &str = r#"rotalog - rotating log writer for Apache httpd and other pipes
@@ -34,6 +34,7 @@ Data flow and maintenance:
 Extensions over Apache rotatelogs:
   -z, --compress            Gzip rotated files asynchronously
       --compress-level <1-9> Gzip level for -z (default 3)
+      --compress-jobs <N>   Parallel compression workers (default 1)
       --fsync-archives <always|data|never>
                             Archive fsync policy for -z (default always)
       --retain <count>      Keep only the newest <count> rotated files
@@ -151,6 +152,10 @@ where
             "compress-level" => {
                 let value = self.take_value("--compress-level", inline)?;
                 self.cfg.compress_level = Some(parse_compress_level(&value)?);
+            }
+            "compress-jobs" => {
+                let value = self.take_value("--compress-jobs", inline)?;
+                self.cfg.compress_jobs = Some(parse_compress_jobs(&value)?);
             }
             "fsync-archives" => {
                 let value = self.take_value("--fsync-archives", inline)?;
@@ -421,6 +426,21 @@ fn parse_archive_fsync(value: &OsStr) -> Result<ArchiveFsync> {
     }
 }
 
+fn parse_compress_jobs(value: &OsStr) -> Result<usize> {
+    let text = value
+        .to_str()
+        .ok_or_else(|| Error::usage("--compress-jobs requires a number"))?;
+    let jobs = text
+        .parse::<usize>()
+        .map_err(|_| Error::usage("--compress-jobs requires a number"))?;
+    if !(1..=MAX_COMPRESS_JOBS).contains(&jobs) {
+        return Err(Error::usage(format!(
+            "--compress-jobs must be between 1 and {MAX_COMPRESS_JOBS}"
+        )));
+    }
+    Ok(jobs)
+}
+
 fn is_option(arg: &OsStr) -> bool {
     let bytes = arg.as_encoded_bytes();
     bytes.len() > 1 && bytes[0] == b'-'
@@ -524,6 +544,8 @@ mod tests {
             "--compress",
             "--compress-level",
             "1",
+            "--compress-jobs",
+            "2",
             "--fsync-archives",
             "data",
             "access.%Y%m%d.log",
@@ -535,6 +557,7 @@ mod tests {
         assert_eq!(config.retain, Some(14));
         assert!(config.compress);
         assert_eq!(config.compress_level, Some(1));
+        assert_eq!(config.compress_jobs, Some(2));
         assert_eq!(config.archive_fsync, Some(ArchiveFsync::Data));
     }
 
@@ -544,6 +567,14 @@ mod tests {
         assert!(parse_args(&["-z", "--compress-level=3", "access.log", "60"]).is_ok());
         assert!(parse_args(&["-z", "--compress-level=0", "access.log", "60"]).is_err());
         assert!(parse_args(&["-z", "--compress-level=10", "access.log", "60"]).is_err());
+    }
+
+    #[test]
+    fn compress_jobs_requires_compress_and_valid_range() {
+        assert!(parse_args(&["--compress-jobs", "2", "access.log", "60"]).is_err());
+        assert!(parse_args(&["-z", "--compress-jobs=2", "access.log", "60"]).is_ok());
+        assert!(parse_args(&["-z", "--compress-jobs=0", "access.log", "60"]).is_err());
+        assert!(parse_args(&["-z", "--compress-jobs=33", "access.log", "60"]).is_err());
     }
 
     #[test]
