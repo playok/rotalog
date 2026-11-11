@@ -78,6 +78,7 @@ Extensions over Apache rotatelogs:
 | Option | Description |
 | --- | --- |
 | `-z`, `--compress` | Gzip rotated files in the background |
+| `--compress-level <1-9>` | Gzip level for `-z`; default 3 (1=fast, 6-9=smaller) |
 | `--retain <count>` | Keep only the newest `count` archives from this process |
 
 ## Compatibility and Differences
@@ -104,7 +105,8 @@ Intentional differences:
 
 `-p` cannot be combined with `-z`/`--retain` because the post-rotate program may
 read the previous file asynchronously. `-z` is also incompatible with `-t`,
-`-T`, and `-n`.
+`-T`, and `-n`. `--compress-level` requires `-z`; the default is 3, with 1 for
+speed and 6-9 for smaller archives.
 
 ## Performance Benchmarks
 
@@ -126,7 +128,7 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-- 67 unit tests
+- 69 unit tests
 - 21 integration tests (including one Linux-only write-failure test)
 - 5 differential compatibility tests (51-case argv matrix plus malformed,
   extension, oracle-identity, and behavior checks)

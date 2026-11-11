@@ -7,6 +7,10 @@ use crate::naming;
 /// the symmetric ±14 hour limit also satisfies chrono's `FixedOffset` range.
 pub const MAX_OFFSET_MINUTES: i32 = 14 * 60;
 
+/// Default gzip level for log archives. Level 3 is a speed/size compromise;
+/// level 1 is fastest and 6-9 produce smaller archives.
+pub const DEFAULT_COMPRESS_LEVEL: u8 = 3;
+
 /// Rotation limits. Time and size may be combined; whichever is reached first
 /// wins.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -53,6 +57,8 @@ pub struct Config {
 
     /// Compress rotated files asynchronously with gzip.
     pub compress: bool,
+    /// Optional gzip level (1-9). `None` uses [`DEFAULT_COMPRESS_LEVEL`].
+    pub compress_level: Option<u8>,
     /// Keep at most this many rotated files created by this process.
     pub retain: Option<usize>,
 }
@@ -65,6 +71,11 @@ impl Config {
         } else {
             None
         }
+    }
+
+    /// Effective gzip level, including the default when `-z` is enabled.
+    pub fn effective_compress_level(&self) -> u8 {
+        self.compress_level.unwrap_or(DEFAULT_COMPRESS_LEVEL)
     }
 
     /// Check invariants that are independent of argument order.
@@ -127,6 +138,14 @@ impl Config {
                 return Err(Error::usage(
                     "-z/--compress cannot be combined with -n/--circular",
                 ));
+            }
+        }
+        if let Some(level) = self.compress_level {
+            if !(1..=9).contains(&level) {
+                return Err(Error::usage("--compress-level must be between 1 and 9"));
+            }
+            if !self.compress {
+                return Err(Error::usage("--compress-level requires -z/--compress"));
             }
         }
         if self.retain.is_some() {
@@ -209,6 +228,14 @@ impl Config {
             self.circular.map_or("none".to_owned(), |n| n.to_string())
         );
         eprintln!("  compress rotated:     {}", self.compress);
+        eprintln!(
+            "  compression level:    {}",
+            if self.compress {
+                self.effective_compress_level().to_string()
+            } else {
+                "n/a".to_owned()
+            }
+        );
         eprintln!(
             "  retain rotated:       {}",
             self.retain.map_or("all".to_owned(), |n| n.to_string())
@@ -333,6 +360,25 @@ mod tests {
         config.compress = false;
         config.retain = Some(3);
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn compression_level_requires_compress_and_valid_range() {
+        let mut config = base();
+        config.compress_level = Some(3);
+        assert!(config.validate().is_err());
+
+        config.compress = true;
+        config.validate().unwrap();
+
+        config.compress_level = Some(0);
+        assert!(config.validate().is_err());
+
+        config.compress_level = Some(10);
+        assert!(config.validate().is_err());
+
+        config.compress_level = None;
+        assert_eq!(config.effective_compress_level(), DEFAULT_COMPRESS_LEVEL);
     }
 
     #[test]

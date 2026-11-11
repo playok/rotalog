@@ -95,6 +95,22 @@ Run `scripts/bench.sh` on the target machine and keep the generated
 `results.md` with the PR that changes performance-sensitive code. Do not
 compare results collected on different machines or filesystems.
 
+## Compression level
+
+`-z` defaults to gzip level 3. On a synthetic 64 MiB mixed log with 32 MiB
+rotation, a local smoke run produced:
+
+| Level | User time | Archive size |
+| --- | ---: | ---: |
+| 1 | ~0.09 s | ~7.3 MiB |
+| 3 | ~0.14 s | ~5.6 MiB |
+| 6 | ~0.31 s | ~5.0 MiB |
+| 9 | ~0.48 s | ~4.9 MiB |
+
+Level 1 is the fastest, level 3 is the default balance, and 6-9 are useful when
+archive size matters more than CPU. Wall time also depends on fsync and storage;
+the table is illustrative rather than a strict benchmark.
+
 ## Benchmarking policy
 
 - Add or update a benchmark for every performance-sensitive change.

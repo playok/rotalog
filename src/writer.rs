@@ -70,8 +70,13 @@ impl Writer {
         let zone = Zone::new(cfg.local_time, cfg.offset_minutes);
         let maintenance = if cfg.compress || cfg.retain.is_some() {
             Some(
-                Maintenance::spawn(cfg.compress, cfg.retain, cfg.verbose)
-                    .context("start maintenance worker")?,
+                Maintenance::spawn(
+                    cfg.compress,
+                    cfg.effective_compress_level(),
+                    cfg.retain,
+                    cfg.verbose,
+                )
+                .context("start maintenance worker")?,
             )
         } else {
             None

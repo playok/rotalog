@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufReader, BufWriter, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
@@ -15,6 +15,9 @@ static TEMPORARY_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// is full we leave the file uncompressed instead of blocking the writer or
 /// growing memory without limit.
 const MAINTENANCE_QUEUE_DEPTH: usize = 16;
+
+/// Shared buffer size for compression input and output.
+const COMPRESSION_BUFFER_SIZE: usize = 128 * 1024;
 
 enum Job {
     Retire(PathBuf),
@@ -33,7 +36,18 @@ pub struct Maintenance {
 }
 
 impl Maintenance {
-    pub fn spawn(compress: bool, retain: Option<usize>, verbose: bool) -> io::Result<Self> {
+    pub fn spawn(
+        compress: bool,
+        compress_level: u8,
+        retain: Option<usize>,
+        verbose: bool,
+    ) -> io::Result<Self> {
+        if !(1..=9).contains(&compress_level) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "gzip compression level must be between 1 and 9",
+            ));
+        }
         let (sender, receiver) = mpsc::sync_channel::<Job>(MAINTENANCE_QUEUE_DEPTH);
         let handle = thread::Builder::new()
             .name("rotalog-maintenance".to_owned())
@@ -44,7 +58,7 @@ impl Maintenance {
                     match job {
                         Job::Retire(path) => {
                             let final_path = if compress {
-                                match compress_file(&path, verbose) {
+                                match compress_file(&path, compress_level, verbose) {
                                     Ok(compressed) => compressed,
                                     Err(error) => {
                                         eprintln!(
@@ -132,15 +146,25 @@ impl Drop for Maintenance {
     }
 }
 
-fn compress_file(source: &Path, verbose: bool) -> io::Result<PathBuf> {
+fn compress_file(source: &Path, level: u8, verbose: bool) -> io::Result<PathBuf> {
     let destination = gzip_path(source);
     let (temporary, output) = open_temporary(&destination)?;
 
     let result = (|| -> io::Result<()> {
-        let input = File::open(source)?;
+        let mut input = File::open(source)?;
         let metadata = input.metadata()?;
-        let mut encoder = GzEncoder::new(BufWriter::new(output), Compression::default());
-        io::copy(&mut BufReader::new(input), &mut encoder)?;
+        let output = BufWriter::with_capacity(COMPRESSION_BUFFER_SIZE, output);
+        let mut encoder = GzEncoder::new(output, Compression::new(level as u32));
+        let mut buffer = vec![0_u8; COMPRESSION_BUFFER_SIZE];
+
+        loop {
+            let read = input.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            encoder.write_all(&buffer[..read])?;
+        }
+
         let mut output = encoder.finish()?;
         output.flush()?;
         // The original is removed below; make sure the archive is durable
@@ -237,7 +261,8 @@ mod tests {
         let first = dir.path().join("access.log.1");
         fs::write(&first, b"hello world").unwrap();
 
-        let maintenance = Maintenance::spawn(true, None, false).unwrap();
+        let maintenance =
+            Maintenance::spawn(true, crate::config::DEFAULT_COMPRESS_LEVEL, None, false).unwrap();
         maintenance.retire(first.clone());
         maintenance.finish();
 
@@ -262,7 +287,9 @@ mod tests {
             })
             .collect();
 
-        let maintenance = Maintenance::spawn(false, Some(2), false).unwrap();
+        let maintenance =
+            Maintenance::spawn(false, crate::config::DEFAULT_COMPRESS_LEVEL, Some(2), false)
+                .unwrap();
         for path in &paths {
             maintenance.retire(path.clone());
         }
@@ -299,7 +326,8 @@ mod tests {
         fs::write(&source, b"hello").unwrap();
         fs::set_permissions(&source, fs::Permissions::from_mode(0o4755)).unwrap();
 
-        let maintenance = Maintenance::spawn(true, None, false).unwrap();
+        let maintenance =
+            Maintenance::spawn(true, crate::config::DEFAULT_COMPRESS_LEVEL, None, false).unwrap();
         maintenance.retire(source.clone());
         maintenance.finish();
 
