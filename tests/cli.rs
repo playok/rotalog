@@ -419,7 +419,15 @@ fn compress_and_retain_rotated_files() {
     let log = directory.path().join("access.log");
 
     let output = run_chunks(
-        &["-z", "--retain", "1", log.to_str().unwrap(), "1B"],
+        &[
+            "-z",
+            "--compress-level",
+            "1",
+            "--retain",
+            "1",
+            log.to_str().unwrap(),
+            "1B",
+        ],
         &[b"alpha\n", b"bravo\n", b"charlie\n"],
     );
     assert!(output.status.success(), "stderr: {}", stderr(&output));
@@ -468,6 +476,10 @@ fn rejects_invalid_configuration() {
     let output = run(&["-p", "/bin/true", "-z", log, "60"], b"");
     assert_eq!(output.status.code(), Some(1));
     assert!(stderr(&output).contains("cannot be combined with -z"));
+
+    let output = run(&["--compress-level", "3", log, "60"], b"");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).contains("requires -z"));
 
     let output = run(&[log], b"");
     assert_eq!(output.status.code(), Some(1));

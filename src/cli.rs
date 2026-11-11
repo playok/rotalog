@@ -33,6 +33,7 @@ Data flow and maintenance:
 
 Extensions over Apache rotatelogs:
   -z, --compress            Gzip rotated files asynchronously
+      --compress-level <1-9> Gzip level for -z (default 3)
       --retain <count>      Keep only the newest <count> rotated files
 
 Other:
@@ -145,6 +146,10 @@ where
             "echo" => self.set_flag(name, inline, |cfg| cfg.echo = true)?,
             "create-empty" => self.set_flag(name, inline, |cfg| cfg.create_empty = true)?,
             "compress" => self.set_flag(name, inline, |cfg| cfg.compress = true)?,
+            "compress-level" => {
+                let value = self.take_value("--compress-level", inline)?;
+                self.cfg.compress_level = Some(parse_compress_level(&value)?);
+            }
             "link" => {
                 let value = self.take_value("--link", inline)?;
                 self.cfg.link = Some(PathBuf::from(value));
@@ -386,6 +391,19 @@ fn parse_count(value: &OsStr, option: &str) -> Result<usize> {
         .map_err(|_| Error::usage(format!("{option} requires a positive number")))
 }
 
+fn parse_compress_level(value: &OsStr) -> Result<u8> {
+    let text = value
+        .to_str()
+        .ok_or_else(|| Error::usage("--compress-level requires a number from 1 to 9"))?;
+    let level = text
+        .parse::<u8>()
+        .map_err(|_| Error::usage("--compress-level requires a number from 1 to 9"))?;
+    if !(1..=9).contains(&level) {
+        return Err(Error::usage("--compress-level must be between 1 and 9"));
+    }
+    Ok(level)
+}
+
 fn is_option(arg: &OsStr) -> bool {
     let bytes = arg.as_encoded_bytes();
     bytes.len() > 1 && bytes[0] == b'-'
@@ -487,6 +505,8 @@ mod tests {
             "--retain",
             "14",
             "--compress",
+            "--compress-level",
+            "1",
             "access.%Y%m%d.log",
             "5M",
         ])
@@ -495,6 +515,15 @@ mod tests {
         assert_eq!(config.link, Some(PathBuf::from("/tmp/current.log")));
         assert_eq!(config.retain, Some(14));
         assert!(config.compress);
+        assert_eq!(config.compress_level, Some(1));
+    }
+
+    #[test]
+    fn compression_level_requires_compress() {
+        assert!(parse_args(&["--compress-level", "3", "access.log", "60"]).is_err());
+        assert!(parse_args(&["-z", "--compress-level=3", "access.log", "60"]).is_ok());
+        assert!(parse_args(&["-z", "--compress-level=0", "access.log", "60"]).is_err());
+        assert!(parse_args(&["-z", "--compress-level=10", "access.log", "60"]).is_err());
     }
 
     #[test]
