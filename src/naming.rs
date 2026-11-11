@@ -230,7 +230,13 @@ pub fn unique_path_from(base: &Path, start: u64) -> (PathBuf, u64) {
     if !occupied(base) {
         return (base.to_path_buf(), 1);
     }
+    unique_path_after(base, start)
+}
 
+/// Like [`unique_path_from`], but assumes `base` itself is already occupied.
+/// This avoids an extra `stat` when the writer already has a suffix cursor for
+/// the same base name.
+pub fn unique_path_after(base: &Path, start: u64) -> (PathBuf, u64) {
     let mut number = start.max(1);
     loop {
         let candidate = append_suffix(base, &format!(".{number}"));
@@ -424,6 +430,10 @@ mod tests {
         assert_eq!(next, 4);
 
         let (path, next) = unique_path_from(&base, 3);
+        assert_eq!(path, dir.path().join("access.log.3"));
+        assert_eq!(next, 4);
+
+        let (path, next) = unique_path_after(&base, 3);
         assert_eq!(path, dir.path().join("access.log.3"));
         assert_eq!(next, 4);
     }

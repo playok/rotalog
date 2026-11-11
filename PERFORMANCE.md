@@ -153,6 +153,14 @@ A 128 MiB smoke run with 5 runs measured ~110 ms for immediate echo vs ~75 ms
 for buffered echo (about 32% faster), with high run-to-run variance. Use
 `scripts/bench.sh` on the target pipeline before changing the default.
 
+Rotation-heavy micro-optimizations in the current implementation:
+
+- reuse the period offset instead of doing two local-time lookups
+- keep a suffix cursor and skip the extra base `stat`
+- cache the last created `-D` parent directory
+- try a hard link before canonicalizing the target, and short-circuit
+  canonicalization in `same_file`
+
 ## Benchmarking policy
 
 - Add or update a benchmark for every performance-sensitive change.

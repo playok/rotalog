@@ -18,8 +18,6 @@ pub fn update(link: &Path, target: &Path, create_dirs: bool, verbose: bool) -> i
         }
     }
 
-    let absolute_target = fs::canonicalize(target)?;
-
     // If the convenience link already names the same file, there is nothing
     // to replace. This is important for -t, where the link and the logfile
     // can resolve to the same path.
@@ -30,7 +28,9 @@ pub fn update(link: &Path, target: &Path, create_dirs: bool, verbose: bool) -> i
     let temporary = temporary_path(link)?;
     remove_if_exists(&temporary)?;
 
-    let hard_link_result = fs::hard_link(&absolute_target, &temporary);
+    // Hard links accept relative targets; canonicalization is only needed for
+    // the symlink fallback below.
+    let hard_link_result = fs::hard_link(target, &temporary);
     let method = match hard_link_result {
         Ok(()) => "hard link",
         Err(hard_link_error) => {
@@ -38,6 +38,7 @@ pub fn update(link: &Path, target: &Path, create_dirs: bool, verbose: bool) -> i
             // A symlink is more broadly usable and still works with tail -F.
             #[cfg(unix)]
             {
+                let absolute_target = fs::canonicalize(target)?;
                 std::os::unix::fs::symlink(&absolute_target, &temporary).map_err(|symlink_error| {
                     io::Error::new(
                         symlink_error.kind(),
@@ -107,10 +108,13 @@ fn same_file(first: &Path, second: &Path) -> bool {
         }
     }
 
-    match (fs::canonicalize(first), fs::canonicalize(second)) {
-        (Ok(first), Ok(second)) => first == second,
-        _ => false,
-    }
+    let Ok(first) = fs::canonicalize(first) else {
+        return false;
+    };
+    let Ok(second) = fs::canonicalize(second) else {
+        return false;
+    };
+    first == second
 }
 
 #[cfg(test)]
