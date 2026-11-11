@@ -100,6 +100,65 @@ impl Zone {
             render(utc.with_timezone(&offset), pattern)
         }
     }
+
+    /// Render an adjusted timestamp with pre-parsed strftime items.
+    pub fn format_items(
+        &self,
+        items: &[Item<'static>],
+        adjusted_start: i64,
+        offset: i64,
+    ) -> Result<String> {
+        let utc_seconds = adjusted_start
+            .checked_sub(offset)
+            .ok_or_else(|| Error::runtime("timestamp underflow while formatting logfile name"))?;
+        let utc = Utc
+            .timestamp_opt(utc_seconds, 0)
+            .single()
+            .ok_or_else(|| Error::runtime("timestamp is outside the supported range"))?;
+
+        if self.local {
+            render_items(utc.with_timezone(&Local), items)
+        } else {
+            let offset = i32::try_from(offset)
+                .ok()
+                .and_then(FixedOffset::east_opt)
+                .ok_or_else(|| Error::runtime("invalid timezone offset"))?;
+            render_items(utc.with_timezone(&offset), items)
+        }
+    }
+}
+
+/// A strftime pattern parsed once and reused across rotations.
+///
+/// The pattern is leaked into the process-lifetime static allocation so chrono's
+/// borrowed `Item` values can be stored without self-referential unsafe code.
+pub struct Formatter {
+    pattern: &'static str,
+    items: Vec<Item<'static>>,
+}
+
+impl std::fmt::Debug for Formatter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Formatter")
+            .field("pattern", &self.pattern)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Formatter {
+    pub fn new(pattern: &str) -> Self {
+        let pattern: &'static str = Box::leak(pattern.to_owned().into_boxed_str());
+        let items = StrftimeItems::new(pattern).collect();
+        Self { pattern, items }
+    }
+
+    pub fn pattern(&self) -> &str {
+        self.pattern
+    }
+
+    pub fn format(&self, zone: &Zone, adjusted_start: i64, offset: i64) -> Result<String> {
+        zone.format_items(&self.items, adjusted_start, offset)
+    }
 }
 
 fn render<Tz>(dt: DateTime<Tz>, pattern: &str) -> Result<String>
@@ -110,6 +169,17 @@ where
     let mut output = String::new();
     write!(output, "{}", dt.format(pattern))
         .map_err(|_| Error::runtime(format!("invalid strftime pattern {pattern:?}")))?;
+    Ok(output)
+}
+
+fn render_items<Tz>(dt: DateTime<Tz>, items: &[Item<'static>]) -> Result<String>
+where
+    Tz: TimeZone,
+    Tz::Offset: Display,
+{
+    let mut output = String::new();
+    write!(output, "{}", dt.format_with_items(items.iter()))
+        .map_err(|_| Error::runtime("invalid strftime pattern"))?;
     Ok(output)
 }
 
@@ -379,6 +449,16 @@ mod tests {
     fn builds_timestamp_path() {
         let path = timestamp_path(Path::new("/var/log/access.log"), 1_700_000_000);
         assert_eq!(path, PathBuf::from("/var/log/access.log.1700000000"));
+    }
+
+    #[test]
+    fn parsed_formatter_reuses_items() {
+        let zone = Zone::new(false, 0);
+        let formatter = Formatter::new("%Y-%m-%d %H:%M:%S");
+        let first = formatter.format(&zone, 1_700_000_000, 0).unwrap();
+        let second = formatter.format(&zone, 1_700_000_000, 0).unwrap();
+        assert_eq!(first, "2023-11-14 22:13:20");
+        assert_eq!(second, first);
     }
 
     #[test]

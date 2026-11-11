@@ -35,7 +35,8 @@ and this project follows [Semantic Versioning](https://semver.org/).
 - Compressed files no longer preserve setuid/setgid/sticky bits.
 - `-l` now uses DST-aware local civil-time boundaries.
 - Rotation reuses the period offset, skips redundant suffix/base stats, caches
-  the last `-D` parent, and tries hard links before canonicalization.
+  the last `-D` parent, tries hard links before canonicalization, and reuses
+  parsed strftime items across rotations.
 - README now documents the intentional Apache size-threshold difference.
 
 ### Fixed

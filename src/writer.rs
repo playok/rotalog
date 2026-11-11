@@ -7,7 +7,7 @@ use crate::config::{Config, EchoFlush};
 use crate::error::{Error, IoContext, Result};
 use crate::link;
 use crate::maintenance::Maintenance;
-use crate::naming::{self, Zone};
+use crate::naming::{self, Formatter, Zone};
 use crate::program;
 
 /// How long to keep writing to the old file if opening a new one fails.
@@ -73,6 +73,7 @@ pub struct Writer {
     last_parent: Option<PathBuf>,
     retry_after: Option<Instant>,
     maintenance: Option<Maintenance>,
+    formatter: Option<Formatter>,
     echo: EchoState,
 }
 
@@ -95,6 +96,7 @@ impl Writer {
         } else {
             None
         };
+        let formatter = cfg.pattern().map(Formatter::new);
         let buffered = cfg.effective_echo_flush() == EchoFlush::Buffered;
 
         Ok(Self {
@@ -109,6 +111,7 @@ impl Writer {
             last_parent: None,
             retry_after: None,
             maintenance,
+            formatter,
             echo: EchoState {
                 enabled: true,
                 buffered,
@@ -380,7 +383,7 @@ impl Writer {
         if self.cfg.truncate {
             // -t keeps a literal name as-is; strftime patterns are still
             // expanded so date-based names are respected.
-            let path = if self.cfg.pattern().is_some() {
+            let path = if self.formatter.is_some() {
                 self.render_name(start, offset)?
             } else {
                 self.cfg.logfile.clone()
@@ -421,9 +424,9 @@ impl Writer {
     }
 
     fn render_name(&self, start: i64, offset: i64) -> Result<PathBuf> {
-        match self.cfg.pattern() {
-            Some(pattern) => {
-                let rendered = self.zone.format(pattern, start, offset)?;
+        match &self.formatter {
+            Some(formatter) => {
+                let rendered = formatter.format(&self.zone, start, offset)?;
                 if rendered.is_empty() {
                     return Err(Error::runtime(
                         "strftime logfile pattern produced an empty path",

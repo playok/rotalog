@@ -328,7 +328,7 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-- 단위 테스트 74개: CLI 파싱, 시간 정렬, strftime 검증, 이름 충돌, `-n`/`-t`/`-T`,
+- 단위 테스트 75개: CLI 파싱, 시간 정렬, strftime 검증, 이름 충돌, `-n`/`-t`/`-T`,
   링크, gzip, 보존 정책, DST 경계, 압축 레벨/fsync/worker pool.
 - 통합 테스트 22개 (Linux 기준, macOS 21): 실제 바이너리에 stdin을 공급해 파일 생성,
   크기/시간 회전, `-e`, `-L`, `-p`, `-D`, `-f`, `-c`, `-z`/`--retain`, 잘못된 설정,
