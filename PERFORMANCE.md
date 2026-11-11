@@ -117,6 +117,11 @@ Level 1 is the fastest, level 3 is the default balance, and 6-9 are useful when
 archive size matters more than CPU. Wall time also depends on fsync and storage;
 the table is illustrative rather than a strict benchmark.
 
+The flate2 backend is `zlib-rs`. A synthetic 64 MiB mixed log at level 3, five
+runs, measured about 0.293 s with miniz_oxide vs 0.227 s with zlib-rs (~22%
+faster). Results depend on CPU and data; rerun the compression benchmark on the
+target platform before changing backends.
+
 `--fsync-archives always|data|never` controls the archive durability barrier.
 `always` (default) calls `sync_all`, `data` calls `sync_data`, and `never` skips
 fsync. The last two can improve throughput on slow storage but weaken crash
