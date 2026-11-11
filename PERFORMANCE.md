@@ -160,6 +160,7 @@ Rotation-heavy micro-optimizations in the current implementation:
 - cache the last created `-D` parent directory
 - try a hard link before canonicalizing the target, and short-circuit
   canonicalization in `same_file`
+- parse the strftime pattern once per writer instead of on every rotation
 
 ## Benchmarking policy
 

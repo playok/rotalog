@@ -137,7 +137,7 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-- 74 unit tests
+- 75 unit tests
 - 22 integration tests on Linux (21 on macOS, including one Linux-only
   write-failure test)
 - 5 differential compatibility tests (51-case argv matrix plus malformed,
