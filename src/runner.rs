@@ -1,7 +1,7 @@
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
 use std::io::{self, Read};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -43,7 +43,7 @@ pub fn run(cfg: Config) -> Result<()> {
         writer.open_initial(now_seconds()?)?;
     }
 
-    let (sender, receiver) = mpsc::sync_channel(QUEUE_DEPTH);
+    let (sender, receiver) = bounded(QUEUE_DEPTH);
     spawn_reader(sender)?;
 
     let loop_result = drive_loop(&mut writer, &receiver, &shutdown);
@@ -102,7 +102,7 @@ fn drain_queue(writer: &mut Writer, receiver: &Receiver<Input>, grace: Duration)
     Ok(())
 }
 
-fn spawn_reader(sender: SyncSender<Input>) -> Result<()> {
+fn spawn_reader(sender: Sender<Input>) -> Result<()> {
     thread::Builder::new()
         .name("stdin-reader".to_owned())
         .spawn(move || {

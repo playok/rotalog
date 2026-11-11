@@ -34,6 +34,7 @@ and this project follows [Semantic Versioning](https://semver.org/).
 - `retry` backoff uses monotonic `Instant`.
 - Compressed files no longer preserve setuid/setgid/sticky bits.
 - `-l` now uses DST-aware local civil-time boundaries.
+- The stdin→writer queue uses a crossbeam bounded channel.
 - Rotation reuses the period offset, skips redundant suffix/base stats, caches
   the last `-D` parent, tries hard links before canonicalization, reuses parsed
   strftime items, and scans the directory once for a restart suffix cursor.
