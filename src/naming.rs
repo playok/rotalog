@@ -1,0 +1,251 @@
+use std::fmt::{Display, Write as _};
+use std::path::{Path, PathBuf};
+
+use chrono::format::{Item, StrftimeItems};
+use chrono::{DateTime, FixedOffset, Local, Offset, TimeZone, Utc};
+
+use crate::error::{Error, Result};
+
+/// Time base used for interval alignment and filename formatting.
+#[derive(Debug, Clone, Copy)]
+pub struct Zone {
+    local: bool,
+    offset_minutes: i32,
+}
+
+impl Zone {
+    pub fn new(local: bool, offset_minutes: i32) -> Self {
+        Self {
+            local,
+            offset_minutes,
+        }
+    }
+
+    /// Seconds east of UTC at the given instant.
+    ///
+    /// Local time is resolved at `now` rather than once at startup so that a
+    /// long-running logger follows daylight-saving transitions.
+    pub fn offset_at(&self, now_utc: i64) -> i64 {
+        if self.local {
+            Utc.timestamp_opt(now_utc, 0)
+                .single()
+                .map(|dt| dt.with_timezone(&Local).offset().fix().local_minus_utc() as i64)
+                .unwrap_or(0)
+        } else {
+            self.offset_minutes as i64 * 60
+        }
+    }
+
+    /// Convert a UTC timestamp to the "adjusted" timestamp used by Apache
+    /// rotatelogs: UTC plus the local/fixed offset.
+    pub fn adjust(&self, now_utc: i64) -> i64 {
+        now_utc.saturating_add(self.offset_at(now_utc))
+    }
+
+    /// Render an adjusted timestamp with a strftime pattern.
+    ///
+    /// `adjusted_start` already contains the zone offset. `offset` is the
+    /// offset that was in effect when the rotation was planned.
+    pub fn format(&self, pattern: &str, adjusted_start: i64, offset: i64) -> Result<String> {
+        let utc_seconds = adjusted_start
+            .checked_sub(offset)
+            .ok_or_else(|| Error::runtime("timestamp underflow while formatting logfile name"))?;
+        let utc = Utc
+            .timestamp_opt(utc_seconds, 0)
+            .single()
+            .ok_or_else(|| Error::runtime("timestamp is outside the supported range"))?;
+
+        if self.local {
+            render(utc.with_timezone(&Local), pattern)
+        } else {
+            let offset = i32::try_from(offset)
+                .ok()
+                .and_then(FixedOffset::east_opt)
+                .ok_or_else(|| Error::runtime("invalid timezone offset"))?;
+            render(utc.with_timezone(&offset), pattern)
+        }
+    }
+}
+
+fn render<Tz>(dt: DateTime<Tz>, pattern: &str) -> Result<String>
+where
+    Tz: TimeZone,
+    Tz::Offset: Display,
+{
+    let mut output = String::new();
+    write!(output, "{}", dt.format(pattern))
+        .map_err(|_| Error::runtime(format!("invalid strftime pattern {pattern:?}")))?;
+    Ok(output)
+}
+
+/// Validate a strftime pattern before it is used at runtime.
+pub fn validate_pattern(pattern: &str) -> Result<()> {
+    for item in StrftimeItems::new(pattern) {
+        if matches!(item, Item::Error) {
+            return Err(Error::usage(format!(
+                "invalid strftime conversion in logfile pattern {pattern:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Return true when a path contains a literal percent sign.
+#[cfg(unix)]
+pub fn contains_percent(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    path.as_os_str().as_bytes().contains(&b'%')
+}
+
+#[cfg(not(unix))]
+pub fn contains_percent(path: &Path) -> bool {
+    path.to_string_lossy().contains('%')
+}
+
+/// Round a value down to a multiple of `step` (works for negative values).
+pub fn align_down(value: i64, step: u64) -> i64 {
+    let step = step as i64;
+    value.div_euclid(step) * step
+}
+
+/// Literal logfile name plus Apache's `.nnnnnnnnnn` timestamp suffix.
+pub fn timestamp_path(root: &Path, adjusted_start: i64) -> PathBuf {
+    append_suffix(root, &format!(".{adjusted_start:010}"))
+}
+
+/// Append a suffix to the file name itself, not to the parent directory.
+pub fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// Circular naming: base, base.1, ... base.(n-1).
+pub fn circular_path(root: &Path, current: Option<usize>, count: usize) -> (PathBuf, usize) {
+    match current {
+        None => (root.to_path_buf(), 0),
+        Some(number) if number + 1 >= count => (root.to_path_buf(), 0),
+        Some(number) => {
+            let next = number + 1;
+            (append_suffix(root, &format!(".{next}")), next)
+        }
+    }
+}
+
+/// Pick a name that does not exist yet by appending `.1`, `.2`, ...
+///
+/// This is intentionally used when a rotation computes the same name as the
+/// current file, which Apache rotatelogs would silently overwrite.
+pub fn unique_path(base: &Path) -> PathBuf {
+    if !occupied(base) {
+        return base.to_path_buf();
+    }
+
+    let mut number = 1_u64;
+    loop {
+        let candidate = append_suffix(base, &format!(".{number}"));
+        if !occupied(&candidate) {
+            return candidate;
+        }
+        number += 1;
+    }
+}
+
+fn occupied(path: &Path) -> bool {
+    // symlink_metadata also catches dangling symlinks, which `exists` misses.
+    std::fs::symlink_metadata(path).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alignment_uses_floor_division() {
+        assert_eq!(align_down(0, 60), 0);
+        assert_eq!(align_down(59, 60), 0);
+        assert_eq!(align_down(60, 60), 60);
+        assert_eq!(align_down(61, 60), 60);
+        assert_eq!(align_down(-1, 60), -60);
+        assert_eq!(align_down(1_700_000_000, 3_600), 1_699_999_200);
+    }
+
+    #[test]
+    fn detects_percent_in_path() {
+        assert!(contains_percent(Path::new("access.%Y.log")));
+        assert!(!contains_percent(Path::new("access.log")));
+    }
+
+    #[test]
+    fn validates_patterns() {
+        validate_pattern("%Y-%m-%d-%H_%M_%S.log").unwrap();
+        validate_pattern("100%% literal.log").unwrap();
+        assert!(validate_pattern("broken-%Q.log").is_err());
+        assert!(validate_pattern("trailing-%").is_err());
+    }
+
+    #[test]
+    fn formats_utc_pattern() {
+        let zone = Zone::new(false, 0);
+        let offset = zone.offset_at(1_700_000_000);
+        let rendered = zone
+            .format("%Y-%m-%d %H:%M:%S", 1_700_000_000, offset)
+            .unwrap();
+        assert_eq!(rendered, "2023-11-14 22:13:20");
+    }
+
+    #[test]
+    fn formats_fixed_offset_pattern() {
+        let zone = Zone::new(false, 9 * 60);
+        let offset = zone.offset_at(1_700_000_000);
+        assert_eq!(offset, 9 * 3600);
+
+        // The adjusted timestamp itself represents the wall clock.
+        let rendered = zone
+            .format("%Y-%m-%d %H:%M:%S %z", 1_700_000_000, offset)
+            .unwrap();
+        assert_eq!(rendered, "2023-11-14 22:13:20 +0900");
+    }
+
+    #[test]
+    fn builds_timestamp_path() {
+        let path = timestamp_path(Path::new("/var/log/access.log"), 1_700_000_000);
+        assert_eq!(path, PathBuf::from("/var/log/access.log.1700000000"));
+    }
+
+    #[test]
+    fn circular_names_cycle() {
+        let root = Path::new("access.log");
+        assert_eq!(
+            circular_path(root, None, 3),
+            (PathBuf::from("access.log"), 0)
+        );
+        assert_eq!(
+            circular_path(root, Some(0), 3),
+            (PathBuf::from("access.log.1"), 1)
+        );
+        assert_eq!(
+            circular_path(root, Some(1), 3),
+            (PathBuf::from("access.log.2"), 2)
+        );
+        assert_eq!(
+            circular_path(root, Some(2), 3),
+            (PathBuf::from("access.log"), 0)
+        );
+        assert_eq!(
+            circular_path(root, Some(0), 1),
+            (PathBuf::from("access.log"), 0)
+        );
+    }
+
+    #[test]
+    fn unique_path_skips_existing_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("access.log");
+        assert_eq!(unique_path(&base), base);
+
+        std::fs::write(&base, b"current").unwrap();
+        std::fs::write(dir.path().join("access.log.1"), b"old").unwrap();
+        assert_eq!(unique_path(&base), dir.path().join("access.log.2"));
+    }
+}

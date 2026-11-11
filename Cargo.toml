@@ -1,0 +1,29 @@
+[package]
+name = "rotalog"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Safe, fast log rotation for Apache-style pipes, written in Rust"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/playok/rotalog"
+homepage = "https://github.com/playok/rotalog"
+keywords = ["logging", "rotation", "apache", "httpd", "rotatelogs"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "rotalog"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+flate2 = "1.1"
+signal-hook = "0.4"
+
+[dev-dependencies]
+tempfile = "3.27"
+
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1
