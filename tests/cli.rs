@@ -288,12 +288,18 @@ fn create_empty_mode_opens_a_log_without_input() {
         .spawn()
         .expect("spawn rotalog");
 
-    thread::sleep(Duration::from_millis(1500));
-    let files = matching_files(directory.path(), "access.log");
-    assert!(
-        !files.is_empty(),
-        "-c should create a log file without input"
-    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let files = matching_files(directory.path(), "access.log");
+        if !files.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "-c should create a log file without input"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
 
     drop(child.stdin.take());
     let output = child.wait_with_output().expect("wait for rotalog");
@@ -388,6 +394,26 @@ fn coarse_strftime_size_rotations_do_not_overwrite_each_other() {
 }
 
 #[test]
+fn size_limit_rotates_before_exceeding() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let log = directory.path().join("access.log");
+
+    let output = run_chunks(&[log.to_str().unwrap(), "10B"], &[b"123456", b"abcdef"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+
+    let files = matching_files(directory.path(), "access.log");
+    assert_eq!(files.len(), 2, "files: {files:?}");
+    let mut contents: Vec<Vec<u8>> = files.iter().map(|path| fs::read(path).unwrap()).collect();
+    contents.sort();
+    assert_eq!(
+        contents,
+        vec![b"123456".to_vec(), b"abcdef".to_vec()],
+        "rotalog rotates before writing a chunk that would exceed the limit; \
+         Apache rotatelogs rotates only after the limit is exceeded"
+    );
+}
+
+#[test]
 fn compress_and_retain_rotated_files() {
     let directory = tempfile::tempdir().expect("temp dir");
     let log = directory.path().join("access.log");
@@ -439,6 +465,10 @@ fn rejects_invalid_configuration() {
     assert_eq!(output.status.code(), Some(1));
     assert!(stderr(&output).contains("cannot be combined with -l"));
 
+    let output = run(&["-p", "/bin/true", "-z", log, "60"], b"");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).contains("cannot be combined with -z"));
+
     let output = run(&[log], b"");
     assert_eq!(output.status.code(), Some(1));
 
@@ -460,6 +490,18 @@ fn accepts_time_and_size_together() {
     let output = run(&[log.to_str().unwrap(), "3600", "5M"], b"both\n");
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert_eq!(matching_files(directory.path(), "access.log").len(), 1);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn write_failure_exits_with_status_2() {
+    let output = run(&["/dev/full", "86400"], b"this cannot be written\n");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("write to logfile /dev/full"),
+        "stderr: {}",
+        stderr(&output)
+    );
 }
 
 #[test]

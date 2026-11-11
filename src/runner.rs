@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use signal_hook::consts::{SIGINT, SIGTERM};
 
@@ -14,6 +14,7 @@ use crate::writer::Writer;
 const READ_CHUNK: usize = 64 * 1024;
 const TICK: Duration = Duration::from_millis(200);
 const QUEUE_DEPTH: usize = 64;
+const DRAIN_GRACE: Duration = Duration::from_millis(250);
 
 enum Input {
     Data(Vec<u8>),
@@ -28,18 +29,19 @@ enum Input {
 /// (no lock contention around the file) and still lets a quiet pipe be ticked
 /// for `-c` and graceful signal handling.
 pub fn run(cfg: Config) -> Result<()> {
-    let open_immediately = cfg.force_open;
-
-    let mut writer = Writer::new(cfg)?;
-    if open_immediately {
-        writer.open_initial(now_seconds()?)?;
-    }
-
+    // Register termination handlers before any potentially blocking file open
+    // so a slow filesystem cannot swallow SIGTERM/SIGINT.
     let shutdown = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(SIGTERM, Arc::clone(&shutdown))
         .context("register SIGTERM handler")?;
     signal_hook::flag::register(SIGINT, Arc::clone(&shutdown))
         .context("register SIGINT handler")?;
+
+    let open_immediately = cfg.force_open;
+    let mut writer = Writer::new(cfg)?;
+    if open_immediately {
+        writer.open_initial(now_seconds()?)?;
+    }
 
     let (sender, receiver) = mpsc::sync_channel(QUEUE_DEPTH);
     spawn_reader(sender)?;
@@ -58,7 +60,7 @@ fn drive_loop(
 ) -> Result<()> {
     loop {
         if shutdown.load(Ordering::Relaxed) {
-            drain_queue(writer, receiver)?;
+            drain_queue(writer, receiver, DRAIN_GRACE)?;
             return Ok(());
         }
 
@@ -69,20 +71,32 @@ fn drive_loop(
                 return Err(Error::io("read from stdin", error));
             }
             Err(RecvTimeoutError::Timeout) => writer.tick(now_seconds()?)?,
-            Err(RecvTimeoutError::Disconnected) => return Ok(()),
+            Err(RecvTimeoutError::Disconnected) => {
+                if shutdown.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+                return Err(Error::runtime("stdin reader stopped unexpectedly"));
+            }
         }
     }
 }
 
-/// On SIGTERM/SIGINT, write out records that already reached the queue before
-/// shutting down. The reader thread may still be blocked on stdin; the process
-/// exits once the writer is finished.
-fn drain_queue(writer: &mut Writer, receiver: &Receiver<Input>) -> Result<()> {
-    while let Ok(message) = receiver.try_recv() {
-        match message {
-            Input::Data(data) => writer.write(&data, now_seconds()?)?,
-            Input::Eof => break,
-            Input::Error(_) => break,
+/// On SIGTERM/SIGINT, give the reader a short grace period to hand over data
+/// that is already in flight, then flush and finish. This is best-effort: data
+/// still unread in the OS pipe beyond the grace window is not guaranteed.
+fn drain_queue(writer: &mut Writer, receiver: &Receiver<Input>, grace: Duration) -> Result<()> {
+    let deadline = Instant::now() + grace;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match receiver.recv_timeout(remaining) {
+            Ok(Input::Data(data)) => writer.write(&data, now_seconds()?)?,
+            Ok(Input::Eof) => break,
+            Ok(Input::Error(_)) => break,
+            Err(RecvTimeoutError::Timeout) => break,
+            Err(RecvTimeoutError::Disconnected) => break,
         }
     }
     Ok(())

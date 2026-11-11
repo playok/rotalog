@@ -58,10 +58,6 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn offset_seconds(&self) -> i32 {
-        self.offset_minutes * 60
-    }
-
     /// The base path as a `strftime` pattern, if it contains `%`.
     pub fn pattern(&self) -> Option<&str> {
         if naming::contains_percent(&self.logfile) {
@@ -154,6 +150,12 @@ impl Config {
             .is_some_and(|p| p.as_os_str().is_empty())
         {
             return Err(Error::usage("program path must not be empty"));
+        }
+        if self.program.is_some() && (self.compress || self.retain.is_some()) {
+            return Err(Error::usage(
+                "-p/--program cannot be combined with -z/--compress or --retain: \
+                 the post-rotate program may read the previous file asynchronously",
+            ));
         }
         if self
             .link
@@ -318,6 +320,18 @@ mod tests {
         let mut config = base();
         config.circular = Some(3);
         config.retain = Some(2);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn program_rejects_compression_and_retention() {
+        let mut config = base();
+        config.program = Some(PathBuf::from("/bin/true"));
+        config.compress = true;
+        assert!(config.validate().is_err());
+
+        config.compress = false;
+        config.retain = Some(3);
         assert!(config.validate().is_err());
     }
 

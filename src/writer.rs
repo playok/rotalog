@@ -1,6 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::error::{Error, IoContext, Result};
@@ -10,7 +11,7 @@ use crate::naming::{self, Zone};
 use crate::program;
 
 /// How long to keep writing to the old file if opening a new one fails.
-const ROTATION_RETRY_SECONDS: i64 = 5;
+const ROTATION_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reason {
@@ -35,17 +36,30 @@ struct CurrentFile {
     size: u64,
 }
 
+impl std::fmt::Debug for CurrentFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CurrentFile")
+            .field("path", &self.path)
+            .field("size", &self.size)
+            .finish_non_exhaustive()
+    }
+}
+
 /// The rotating writer itself. All methods take the current UTC timestamp so
 /// rotation can be tested deterministically without sleeping.
+#[derive(Debug)]
 pub struct Writer {
     cfg: Config,
     zone: Zone,
     current: Option<CurrentFile>,
-    period_end: i64,
+    period_end_utc: i64,
     file_number: Option<usize>,
+    /// Base name and next numeric suffix for consecutive size rotations.
+    size_base: Option<PathBuf>,
+    size_next: u64,
     /// First timer deadline for -c when no file is open yet.
     empty_next: Option<i64>,
-    retry_at: i64,
+    retry_after: Option<Instant>,
     maintenance: Option<Maintenance>,
     echo_enabled: bool,
 }
@@ -67,10 +81,12 @@ impl Writer {
             cfg,
             zone,
             current: None,
-            period_end: 0,
+            period_end_utc: 0,
             file_number: None,
+            size_base: None,
+            size_next: 1,
             empty_next: None,
-            retry_at: 0,
+            retry_after: None,
             maintenance,
             echo_enabled: true,
         })
@@ -125,19 +141,18 @@ impl Writer {
         };
         debug_assert!(interval > 0);
 
-        let now_adjusted = self.zone.adjust(now_utc);
         if self.current.is_none() {
             let deadline = *self
                 .empty_next
-                .get_or_insert_with(|| now_adjusted.saturating_add(interval as i64));
-            if now_adjusted >= deadline {
+                .get_or_insert_with(|| now_utc.saturating_add(interval as i64));
+            if now_utc >= deadline {
                 self.empty_next = None;
                 self.rotate(Reason::New, now_utc)?;
             }
             return Ok(());
         }
 
-        if now_adjusted >= self.period_end {
+        if now_utc >= self.period_end_utc {
             self.try_rotate(Reason::Time, now_utc)?;
         }
         Ok(())
@@ -169,7 +184,7 @@ impl Writer {
 
         if let Some(interval) = self.cfg.rotation.interval_secs {
             debug_assert!(interval > 0);
-            if self.zone.adjust(now_utc) >= self.period_end {
+            if now_utc >= self.period_end_utc {
                 return self.try_rotate(Reason::Time, now_utc);
             }
         }
@@ -184,14 +199,15 @@ impl Writer {
     }
 
     fn try_rotate(&mut self, reason: Reason, now_utc: i64) -> Result<()> {
-        let now_adjusted = self.zone.adjust(now_utc);
-        if now_adjusted < self.retry_at {
-            return Ok(());
+        if let Some(retry_after) = self.retry_after {
+            if Instant::now() < retry_after {
+                return Ok(());
+            }
         }
 
         match self.rotate(reason, now_utc) {
             Ok(()) => {
-                self.retry_at = 0;
+                self.retry_after = None;
                 Ok(())
             }
             Err(error) if self.current.is_some() => {
@@ -202,7 +218,7 @@ impl Writer {
                     .map(|current| current.path.display().to_string())
                     .unwrap_or_default();
                 eprintln!("rotalog: rotation failed; continuing with {path}: {error}");
-                self.retry_at = now_adjusted.saturating_add(ROTATION_RETRY_SECONDS);
+                self.retry_after = Some(Instant::now() + ROTATION_RETRY_DELAY);
                 Ok(())
             }
             Err(error) => Err(error),
@@ -214,37 +230,37 @@ impl Writer {
         let initial = previous.is_none();
 
         let offset = self.zone.offset_at(now_utc);
-        let now_adjusted = now_utc.saturating_add(offset);
-
-        let mut start = match self.cfg.rotation.interval_secs {
-            Some(interval) => naming::align_down(now_adjusted, interval),
-            None => now_adjusted,
+        let period = match self.cfg.rotation.interval_secs {
+            Some(interval) => {
+                if reason == Reason::Size && now_utc < self.period_end_utc {
+                    // A size rotation in the middle of an interval is named
+                    // with the actual rotation time, like Apache rotatelogs,
+                    // while keeping the current period end.
+                    naming::Period {
+                        start_utc: now_utc,
+                        start_adjusted: now_utc.saturating_add(offset),
+                        offset_seconds: offset,
+                        end_utc: self.period_end_utc,
+                    }
+                } else {
+                    self.zone.period(now_utc, interval)?
+                }
+            }
+            None => naming::Period {
+                start_utc: now_utc,
+                start_adjusted: now_utc.saturating_add(offset),
+                offset_seconds: offset,
+                end_utc: 0,
+            },
         };
-        let mut end = self
-            .cfg
-            .rotation
-            .interval_secs
-            .map(|interval| start.saturating_add(interval as i64))
-            .unwrap_or(0);
 
-        // A size-based rotation in the middle of an interval is named with the
-        // actual rotation time, like Apache rotatelogs, rather than with the
-        // interval start.
-        if reason == Reason::Size
-            && self.cfg.rotation.interval_secs.is_some()
-            && start < self.period_end
-        {
-            start = now_adjusted;
-        }
-
-        // If we crossed a boundary because the process was busy/suspended,
-        // recompute the interval end for the new start.
-        if reason == Reason::Time && start >= self.period_end {
-            end = start.saturating_add(self.cfg.rotation.interval_secs.unwrap_or(0) as i64);
-        }
-
-        let (path, truncate, next_file_number) =
-            self.plan_target(reason, initial, start, offset, previous.as_deref())?;
+        let (path, truncate, next_file_number) = self.plan_target(
+            reason,
+            initial,
+            period.start_adjusted,
+            period.offset_seconds,
+            previous.as_deref(),
+        )?;
 
         if self.cfg.verbose {
             eprintln!(
@@ -315,14 +331,14 @@ impl Writer {
         }
 
         self.current = Some(CurrentFile { path, file, size });
-        self.period_end = end;
+        self.period_end_utc = period.end_utc;
         self.file_number = next_file_number;
         self.empty_next = None;
         Ok(())
     }
 
     fn plan_target(
-        &self,
+        &mut self,
         reason: Reason,
         initial: bool,
         start: i64,
@@ -342,8 +358,8 @@ impl Writer {
 
         if let Some(count) = self.cfg.circular {
             let (path, number) = naming::circular_path(&self.cfg.logfile, self.file_number, count);
-            // The initial file is appended to unless -t was requested (which
-            // is rejected with -n). Every later file is truncated.
+            // -t takes precedence over -n, so this branch is not reached when
+            // truncate mode is active. Every later circular file is truncated.
             return Ok((path, !initial, Some(number)));
         }
 
@@ -351,8 +367,16 @@ impl Writer {
         if reason == Reason::Size {
             // A coarse strftime pattern can produce the same name several
             // times in one interval. Never append new records to an older
-            // archive: pick the next free suffix instead.
-            path = naming::unique_path(&path);
+            // archive: pick the next free suffix instead. Keep the next suffix
+            // so repeated size rotations do not rescan from .1 every time.
+            let start = match self.size_base.as_deref() {
+                Some(base) if base == path.as_path() => self.size_next,
+                _ => 1,
+            };
+            let (unique, next) = naming::unique_path_from(&path, start);
+            self.size_base = Some(path);
+            self.size_next = next;
+            path = unique;
         } else if previous == Some(path.as_path()) {
             // Clock went backwards, or the pattern does not distinguish the
             // current period. Do not truncate the file we are writing to.

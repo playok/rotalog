@@ -2,9 +2,19 @@ use std::fmt::{Display, Write as _};
 use std::path::{Path, PathBuf};
 
 use chrono::format::{Item, StrftimeItems};
-use chrono::{DateTime, FixedOffset, Local, Offset, TimeZone, Utc};
+use chrono::{DateTime, Duration, FixedOffset, Local, LocalResult, Offset, TimeZone, Utc};
 
 use crate::error::{Error, Result};
+
+/// Rotation period start/end in UTC plus the adjusted timestamp and offset
+/// needed to render the period start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Period {
+    pub start_utc: i64,
+    pub start_adjusted: i64,
+    pub offset_seconds: i64,
+    pub end_utc: i64,
+}
 
 /// Time base used for interval alignment and filename formatting.
 #[derive(Debug, Clone, Copy)]
@@ -40,6 +50,31 @@ impl Zone {
     /// rotatelogs: UTC plus the local/fixed offset.
     pub fn adjust(&self, now_utc: i64) -> i64 {
         now_utc.saturating_add(self.offset_at(now_utc))
+    }
+
+    /// Compute the rotation period containing `now_utc`.
+    ///
+    /// For local time we align to local civil time and convert both boundaries
+    /// back to UTC. This keeps daily/hourly boundaries at local midnight/hour
+    /// across DST transitions.
+    pub fn period(&self, now_utc: i64, interval: u64) -> Result<Period> {
+        assert!(interval > 0, "rotation interval must be positive");
+        if self.local {
+            civil_period(&Local, now_utc, interval)
+        } else {
+            let offset = self.offset_at(now_utc);
+            let now_adjusted = now_utc.saturating_add(offset);
+            let start_adjusted = align_down(now_adjusted, interval);
+            let start_utc = start_adjusted.checked_sub(offset).ok_or_else(|| {
+                Error::runtime("timestamp underflow while computing rotation period")
+            })?;
+            Ok(Period {
+                start_utc,
+                start_adjusted,
+                offset_seconds: offset,
+                end_utc: start_utc.saturating_add(interval as i64),
+            })
+        }
     }
 
     /// Render an adjusted timestamp with a strftime pattern.
@@ -103,9 +138,57 @@ pub fn contains_percent(path: &Path) -> bool {
 }
 
 /// Round a value down to a multiple of `step` (works for negative values).
-pub fn align_down(value: i64, step: u64) -> i64 {
-    let step = step as i64;
+pub(crate) fn align_down(value: i64, step: u64) -> i64 {
+    assert!(step > 0, "rotation step must be positive");
+    let step = i64::try_from(step).expect("rotation step must fit in i64");
     value.div_euclid(step) * step
+}
+
+fn civil_period<Tz: TimeZone>(tz: &Tz, now_utc: i64, interval: u64) -> Result<Period> {
+    let now = Utc
+        .timestamp_opt(now_utc, 0)
+        .single()
+        .ok_or_else(|| Error::runtime("timestamp is outside the supported range"))?
+        .with_timezone(tz);
+    let wall_seconds = now.naive_local().and_utc().timestamp();
+    let start_wall = align_down(wall_seconds, interval);
+    let end_wall = start_wall.saturating_add(interval as i64);
+
+    let start = local_from_wall(tz, start_wall)?;
+    let end = local_from_wall(tz, end_wall)?;
+    let offset = start.offset().fix().local_minus_utc() as i64;
+    let start_utc = start.timestamp();
+
+    Ok(Period {
+        start_utc,
+        start_adjusted: start_utc.saturating_add(offset),
+        offset_seconds: offset,
+        end_utc: end.timestamp(),
+    })
+}
+
+fn local_from_wall<Tz: TimeZone>(tz: &Tz, wall_seconds: i64) -> Result<DateTime<Tz>> {
+    let naive = DateTime::from_timestamp(wall_seconds, 0)
+        .ok_or_else(|| Error::runtime("timestamp is outside the supported range"))?
+        .naive_utc();
+
+    match tz.from_local_datetime(&naive) {
+        LocalResult::Single(dt) => Ok(dt),
+        LocalResult::Ambiguous(earliest, _) => Ok(earliest),
+        LocalResult::None => {
+            // A spring-forward gap can swallow a boundary such as 02:00.
+            // Advance to the first valid local instant after the gap.
+            for hours in 1..=3 {
+                let shifted = naive + Duration::hours(hours);
+                if let Some(dt) = tz.from_local_datetime(&shifted).earliest() {
+                    return Ok(dt);
+                }
+            }
+            Err(Error::runtime(
+                "could not resolve local time around a DST transition",
+            ))
+        }
+    }
 }
 
 /// Literal logfile name plus Apache's `.nnnnnnnnnn` timestamp suffix.
@@ -137,17 +220,24 @@ pub fn circular_path(root: &Path, current: Option<usize>, count: usize) -> (Path
 /// This is intentionally used when a rotation computes the same name as the
 /// current file, which Apache rotatelogs would silently overwrite.
 pub fn unique_path(base: &Path) -> PathBuf {
+    unique_path_from(base, 1).0
+}
+
+/// Like [`unique_path`], but starts scanning at `start` and returns the next
+/// suffix to try. This lets the writer avoid rescanning `.1`..`.N` on every
+/// size rotation.
+pub fn unique_path_from(base: &Path, start: u64) -> (PathBuf, u64) {
     if !occupied(base) {
-        return base.to_path_buf();
+        return (base.to_path_buf(), 1);
     }
 
-    let mut number = 1_u64;
+    let mut number = start.max(1);
     loop {
         let candidate = append_suffix(base, &format!(".{number}"));
         if !occupied(&candidate) {
-            return candidate;
+            return (candidate, number.saturating_add(1));
         }
-        number += 1;
+        number = number.saturating_add(1);
     }
 }
 
@@ -168,6 +258,12 @@ mod tests {
         assert_eq!(align_down(61, 60), 60);
         assert_eq!(align_down(-1, 60), -60);
         assert_eq!(align_down(1_700_000_000, 3_600), 1_699_999_200);
+    }
+
+    #[test]
+    #[should_panic(expected = "rotation step must be positive")]
+    fn alignment_rejects_zero_step() {
+        align_down(0, 0);
     }
 
     #[test]
@@ -192,6 +288,72 @@ mod tests {
             .format("%Y-%m-%d %H:%M:%S", 1_700_000_000, offset)
             .unwrap();
         assert_eq!(rendered, "2023-11-14 22:13:20");
+    }
+
+    #[test]
+    fn fixed_offset_period_uses_utc_boundaries() {
+        let zone = Zone::new(false, 9 * 60);
+        let period = zone.period(1_700_000_000, 3_600).unwrap();
+        assert_eq!(period.start_utc, 1_699_999_200);
+        assert_eq!(period.start_adjusted, 1_699_999_200 + 9 * 3600);
+        assert_eq!(period.offset_seconds, 9 * 3600);
+        assert_eq!(period.end_utc, 1_700_002_800);
+    }
+
+    #[test]
+    fn local_civil_period_handles_spring_forward() {
+        use chrono_tz::America::New_York;
+
+        let now = New_York
+            .with_ymd_and_hms(2024, 3, 10, 1, 30, 0)
+            .earliest()
+            .unwrap()
+            .timestamp();
+        let period = civil_period(&New_York, now, 86_400).unwrap();
+
+        let start = New_York
+            .with_ymd_and_hms(2024, 3, 10, 0, 0, 0)
+            .earliest()
+            .unwrap()
+            .timestamp();
+        let end = New_York
+            .with_ymd_and_hms(2024, 3, 11, 0, 0, 0)
+            .earliest()
+            .unwrap()
+            .timestamp();
+
+        assert_eq!(period.start_utc, start);
+        assert_eq!(period.offset_seconds, -5 * 3600);
+        assert_eq!(period.end_utc, end);
+        assert_eq!(end - start, 23 * 3600);
+    }
+
+    #[test]
+    fn local_civil_period_handles_fall_back() {
+        use chrono_tz::America::New_York;
+
+        let now = New_York
+            .with_ymd_and_hms(2024, 11, 3, 12, 0, 0)
+            .earliest()
+            .unwrap()
+            .timestamp();
+        let period = civil_period(&New_York, now, 86_400).unwrap();
+
+        let start = New_York
+            .with_ymd_and_hms(2024, 11, 3, 0, 0, 0)
+            .earliest()
+            .unwrap()
+            .timestamp();
+        let end = New_York
+            .with_ymd_and_hms(2024, 11, 4, 0, 0, 0)
+            .earliest()
+            .unwrap()
+            .timestamp();
+
+        assert_eq!(period.start_utc, start);
+        assert_eq!(period.offset_seconds, -4 * 3600);
+        assert_eq!(period.end_utc, end);
+        assert_eq!(end - start, 25 * 3600);
     }
 
     #[test]
@@ -247,5 +409,22 @@ mod tests {
         std::fs::write(&base, b"current").unwrap();
         std::fs::write(dir.path().join("access.log.1"), b"old").unwrap();
         assert_eq!(unique_path(&base), dir.path().join("access.log.2"));
+    }
+
+    #[test]
+    fn unique_path_from_returns_the_next_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("access.log");
+        std::fs::write(&base, b"current").unwrap();
+        std::fs::write(dir.path().join("access.log.1"), b"one").unwrap();
+        std::fs::write(dir.path().join("access.log.2"), b"two").unwrap();
+
+        let (path, next) = unique_path_from(&base, 1);
+        assert_eq!(path, dir.path().join("access.log.3"));
+        assert_eq!(next, 4);
+
+        let (path, next) = unique_path_from(&base, 3);
+        assert_eq!(path, dir.path().join("access.log.3"));
+        assert_eq!(next, 4);
     }
 }

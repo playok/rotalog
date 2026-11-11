@@ -305,7 +305,7 @@ const CASES: &[Case] = &[
 fn find_oracle() -> Option<PathBuf> {
     if let Some(path) = env::var_os("ROTATELOGS_ORACLE") {
         let path = PathBuf::from(path);
-        return path.is_file().then_some(path);
+        return (path.is_file() && is_apache_rotatelogs(&path)).then_some(path);
     }
 
     for candidate in [
@@ -316,7 +316,7 @@ fn find_oracle() -> Option<PathBuf> {
         "/usr/local/bin/rotatelogs",
     ] {
         let path = PathBuf::from(candidate);
-        if path.is_file() {
+        if path.is_file() && is_apache_rotatelogs(&path) {
             return Some(path);
         }
     }
@@ -324,12 +324,39 @@ fn find_oracle() -> Option<PathBuf> {
     if let Some(path) = env::var_os("PATH") {
         for directory in env::split_paths(&path) {
             let candidate = directory.join("rotatelogs");
-            if candidate.is_file() {
+            if candidate.is_file() && is_apache_rotatelogs(&candidate) {
                 return Some(candidate);
             }
         }
     }
     None
+}
+
+/// Avoid the failure mode where a `rotatelogs -> rotalog` compatibility
+/// symlink is found on PATH and the differential test compares rotalog to
+/// itself. Apache's `-v` output has a distinctive header.
+fn is_apache_rotatelogs(path: &Path) -> bool {
+    if let (Ok(candidate), Ok(ours)) = (fs::canonicalize(path), fs::canonicalize(OURS)) {
+        if candidate == ours {
+            return false;
+        }
+    }
+
+    let directory = match tempfile::tempdir() {
+        Ok(directory) => directory,
+        Err(_) => return false,
+    };
+    let output = Command::new(path)
+        .args(["-v", "log", "60"])
+        .current_dir(directory.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output();
+    match output {
+        Ok(output) => String::from_utf8_lossy(&output.stderr).contains("Rotation time interval:"),
+        Err(_) => false,
+    }
 }
 
 fn oracle_supports(oracle: &Path, flag: &str) -> bool {
@@ -509,6 +536,11 @@ fn parse_true_false(value: &str) -> Option<bool> {
         "false" => Some(false),
         _ => None,
     }
+}
+
+#[test]
+fn our_binary_is_not_an_apache_oracle() {
+    assert!(!is_apache_rotatelogs(Path::new(OURS)));
 }
 
 #[test]

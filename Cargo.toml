@@ -5,9 +5,11 @@ edition = "2024"
 rust-version = "1.85"
 description = "Safe, fast log rotation for Apache-style pipes, written in Rust"
 license = "MIT"
-readme = "README.md"
+authors = ["playok"]
+readme = "README.en.md"
 repository = "https://github.com/playok/rotalog"
 homepage = "https://github.com/playok/rotalog"
+documentation = "https://docs.rs/rotalog"
 keywords = ["logging", "rotation", "apache", "httpd", "rotatelogs"]
 categories = ["command-line-utilities"]
 
@@ -21,6 +23,7 @@ flate2 = "1.1"
 signal-hook = "0.4"
 
 [dev-dependencies]
+chrono-tz = "0.10"
 tempfile = "3.27"
 
 [profile.release]
