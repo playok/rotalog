@@ -295,6 +295,18 @@ ROTATELOGS_ORACLE=/usr/sbin/rotatelogs \
 
 다음은 원본에 없는 확장입니다: `-h`, `-V`, 모든 long option, `-z`, `--retain`.
 
+## 성능 벤치마크
+
+```sh
+cargo bench --bench writer
+scripts/bench.sh          # hyperfine 필요
+```
+
+- Criterion: `write` 64 B/1 KiB/64 KiB, `-l`, size rotation 64 KiB/1 MiB/64 MiB
+- end-to-end: plain/echo/rotation/compression/local-time
+- baseline과 해석은 `PERFORMANCE.md`에 정리되어 있습니다.
+- CI에서는 `cargo bench --no-run`으로 benchmark compile만 확인합니다.
+
 ## 테스트
 
 ```sh

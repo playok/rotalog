@@ -24,7 +24,12 @@ signal-hook = "0.4"
 
 [dev-dependencies]
 chrono-tz = "0.10"
+criterion = "0.5"
 tempfile = "3.27"
+
+[[bench]]
+name = "writer"
+harness = false
 
 [profile.release]
 lto = "thin"

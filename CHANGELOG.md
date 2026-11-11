@@ -14,6 +14,7 @@ and this project follows [Semantic Versioning](https://semver.org/).
 - Size-rotation suffix cursor to avoid repeated `.1`..`.N` scans.
 - MSRV, dependency audit, and release workflows.
 - English README, security policy, contributing guide, and changelog.
+- Criterion microbenchmarks and a `hyperfine` end-to-end benchmark script.
 
 ### Changed
 

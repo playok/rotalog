@@ -106,6 +106,18 @@ Intentional differences:
 read the previous file asynchronously. `-z` is also incompatible with `-t`,
 `-T`, and `-n`.
 
+## Performance Benchmarks
+
+```sh
+cargo bench --bench writer
+scripts/bench.sh          # requires hyperfine
+```
+
+- Criterion: `write` 64 B/1 KiB/64 KiB, `-l`, size rotation 64 KiB/1 MiB/64 MiB
+- end-to-end: plain/echo/rotation/compression/local-time
+- Baseline and interpretation: `PERFORMANCE.md`
+- CI compiles benchmarks with `cargo bench --no-run`
+
 ## Tests
 
 ```sh

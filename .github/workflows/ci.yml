@@ -23,6 +23,8 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+      - name: Compile benchmarks
+        run: cargo bench --no-run
       - name: Test
         run: cargo test
       - name: Release build
