@@ -104,8 +104,10 @@ Intentional differences:
   this differs from Apache only on DST transition days.
 - A write failure to the current file exits with status 2; a rotation-open
   failure keeps the old file and retries. The maintenance queue is bounded to
-  16 files, compression can run on multiple workers, and retention is applied in
-  rotation order. SIGTERM gives in-flight data a short drain grace period.
+  16 files; queue-full warnings are rate-limited to once per 5 seconds and a
+  total is logged at shutdown. Compression can run on multiple workers, and
+  retention is applied in rotation order. SIGTERM gives in-flight data a short
+  drain grace period.
 
 `-p` cannot be combined with `-z`/`--retain` because the post-rotate program may
 read the previous file asynchronously. `-z` is also incompatible with `-t`,

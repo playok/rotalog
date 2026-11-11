@@ -168,6 +168,7 @@ Rotation-heavy micro-optimizations in the current implementation:
 - parse the strftime pattern once per writer instead of on every rotation
 - scan the directory once to initialize the suffix cursor after restart
 - use a crossbeam bounded channel for stdin→writer transfer
+- rate-limit maintenance queue-full diagnostics and summarize dropped jobs
 
 64 KiB chunk allocation remains; a 512 MiB warm-cache run showed ~0.01 s user
 time, so buffer pooling is deferred unless a line-sized workload proves it
