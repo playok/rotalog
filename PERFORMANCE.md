@@ -161,6 +161,7 @@ Rotation-heavy micro-optimizations in the current implementation:
 - try a hard link before canonicalizing the target, and short-circuit
   canonicalization in `same_file`
 - parse the strftime pattern once per writer instead of on every rotation
+- scan the directory once to initialize the suffix cursor after restart
 
 ## Benchmarking policy
 
