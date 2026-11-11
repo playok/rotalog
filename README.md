@@ -81,7 +81,8 @@ install -m 0755 target/release/rotalog /usr/local/bin/rotalog
 ln -s /usr/local/bin/rotalog /usr/local/bin/rotatelogs
 ```
 
-의존성은 `chrono`(시간대/strftime), `flate2`(gzip), `signal-hook`(시그널)뿐입니다.
+런타임 의존성은 `chrono`(시간대/strftime), `crossbeam-channel`(bounded queue),
+`flate2`(gzip), `signal-hook`(시그널)입니다.
 
 ## 사용법
 
@@ -156,7 +157,7 @@ rotalog [OPTIONS] <logfile> <rotationtime|filesize> [<filesize>] [<offset>]
 
 - `-p` 프로그램은 rotalog의 stdin/stdout/stderr를 그대로 상속합니다. 원본
   Apache 동작과 같으므로, 프로그램이 stdin에서 읽으면 로그 파이프를 소비할 수 있습니다.
-- `strftime` 패턴의 시간 입도는 회전 간격보다 촘촘해야 합니다. 예를 들어 하루 간격으로
+- `strftime` 패턴은 회전 간격을 구분할 수 있는 시간 입도를 사용하세요. 예를 들어 하루 간격으로
   회전하면서 `%Y`만 쓰면 같은 이름이 반복되어 `.1`, `.2` 접미사 파일이 생깁니다.
 - `-n`으로 재사용되는 이전 파일이나 `-t`로 truncate되는 파일을 `-p` 스크립트가 읽는다면,
   스크립트가 실행되는 시점에는 내용이 이미 바뀌었을 수 있습니다. 필요한 내용은 즉시
@@ -192,6 +193,62 @@ access.20261111.log
 access.20261111.log.1
 access.20261111.log.2
 ```
+
+### 날짜·시간 형식 지정자
+
+파일명에는 `yyyy-mm-dd` 같은 문자열 대신 `strftime` 지정자 **`%Y-%m-%d`**를
+사용합니다. 아래는 `2026-11-12 15:04:05 +09:00`을 포맷한 예입니다.
+`-l`을 쓰면 시스템 로컬 시간대, 생략하면 UTC 또는 마지막 위치 인자의 고정 오프셋을
+사용합니다.
+
+| 지정자 | 의미 | 출력 예 |
+| --- | --- | --- |
+| `%Y` | 네 자리 연도 | `2026` |
+| `%y` | 두 자리 연도 | `26` |
+| `%m` | 월 (`01`~`12`) | `11` |
+| `%d` | 일 (`01`~`31`) | `12` |
+| `%H` | 24시간제 시 (`00`~`23`) | `15` |
+| `%I` | 12시간제 시 (`01`~`12`) | `03` |
+| `%p` | 오전/오후 (영문) | `PM` |
+| `%M` | 분 (`00`~`59`) | `04` |
+| `%S` | 초 (두 자리) | `05` |
+| `%j` | 연중 일 번호 (`001`~`366`) | `316` |
+| `%u` | 요일 번호 (월요일=1, 일요일=7) | `4` |
+| `%a` | 요일 축약명 (영문) | `Thu` |
+| `%A` | 요일 전체 이름 (영문) | `Thursday` |
+| `%b` | 월 축약명 (영문) | `Nov` |
+| `%B` | 월 전체 이름 (영문) | `November` |
+| `%F` | `%Y-%m-%d`와 동일 | `2026-11-12` |
+| `%R` | `%H:%M`과 동일 | `15:04` |
+| `%T` | `%H:%M:%S`와 동일 | `15:04:05` |
+| `%z` | UTC 오프셋 (콜론 없음) | `+0900` |
+| `%:z` | UTC 오프셋 (콜론 포함) | `+09:00` |
+| `%s` | Unix 시각 (UTC 기준 초) | `1794463445` |
+| `%%` | 문자 `%` | `%` |
+
+**`%m`은 월, `%M`은 분**입니다. `%R`, `%T`, `%:z`의 콜론을 피하고 싶으면
+파일명에 `%H-%M-%S`, `%z`를 사용하세요. 월·요일 이름은 시스템 locale과 관계없이
+영문으로 출력됩니다. 위 표는 자주 쓰는 지정자이며 전체 문법은 의존성인
+[chrono의 strftime 문서](https://docs.rs/chrono/0.4.45/chrono/format/strftime/index.html)를
+참고하세요. 지원하지 않는 지정자(예: `%Q`)와 끝에 단독으로 남는 `%`는 실행 전에 거부합니다.
+
+### 회전 간격별 파일명 예
+
+아래 출력 예는 같은 시각과 `+09:00` 시간대를 기준으로 합니다. 파일명 패턴과
+회전 간격은 각각 지정해야 합니다. 패턴에 날짜를 넣는 것만으로 회전 간격이 바뀌지는 않습니다.
+
+| 용도 | 파일명 패턴 | 간격 (초) | 출력 파일명 예 |
+| --- | --- | ---: | --- |
+| 일 단위 | `catalina.out.%Y-%m-%d.log` | `86400` | `catalina.out.2026-11-12.log` |
+| 일 단위, 구분자 없는 날짜 | `catalina.out.%Y%m%d.log` | `86400` | `catalina.out.20261112.log` |
+| 시 단위 | `catalina.out.%Y-%m-%d_%H.log` | `3600` | `catalina.out.2026-11-12_15.log` |
+| 분 단위 | `catalina.out.%Y-%m-%d_%H-%M.log` | `60` | `catalina.out.2026-11-12_15-04.log` |
+| 초 단위 | `catalina.out.%Y-%m-%d_%H-%M-%S.log` | `1` | `catalina.out.2026-11-12_15-04-05.log` |
+| 월별 디렉터리, 일 단위 파일 | `logs/%Y/%m/catalina.out.%Y-%m-%d.log` | `86400` | `logs/2026/11/catalina.out.2026-11-12.log` |
+
+패턴에 디렉터리가 포함되면 `-D`로 디렉터리를 자동 생성할 수 있습니다.
+시간 회전 파일명은 해당 구간의 시작 시각을 기준으로 하며, 크기 회전 파일명은 실제
+회전 시각을 사용합니다. 너무 거친 패턴에서 충돌이 생기면 `.1`, `.2`가 붙습니다.
 
 ## 동작 방식
 
@@ -251,8 +308,9 @@ httpd ──stdin──▶ reader thread ──bounded channel──▶ writer t
   순서대로 완료된 아카이브만 삭제합니다. 입력 큐는 16개이며, 대기·실행·완료 순서 대기를 합친 전체 작업은
   `16 + compress-jobs`개로 제한합니다. 큐 또는 전체 용량이 가득 차면 해당
   회전 파일은 압축/보존 처리 없이 남기고 경고를 집계합니다. 종료 시에는 큐에 남은 작업을 마친 뒤 종료합니다.
-- `SIGTERM`/`SIGINT`는 `signal-hook` 플래그로 전달됩니다. writer는 최대 200 ms 안에
-  이를 확인하고, 250 ms grace period 동안 전달 중인 데이터를 흡수한 뒤 정상 종료합니다.
+- `SIGTERM`/`SIGINT`는 `signal-hook` 플래그로 전달됩니다. writer는 입력 대기 중
+  최대 200 ms 간격으로 이를 확인하고, 250 ms grace period 동안 전달 중인 데이터를
+  흡수한 뒤 정상 종료합니다.
   OS pipe에 아직 읽히지 않은 데이터는 grace period를 넘기면 보장되지 않습니다.
 
 ## Apache httpd 설정 예
@@ -283,6 +341,55 @@ CustomLog "|/usr/local/bin/rotalog -z --retain 14 /var/log/httpd/access.%Y%m%d.l
 #!/bin/sh
 exec /usr/local/bin/post-rotate --tag httpd "$@"
 ```
+
+## Tomcat `catalina.out` 설정 예
+
+Tomcat 9의 `CATALINA_OUT_CMD`를 사용하면 JVM의 stdout·stderr를 rotalog에 전달할 수
+있습니다. 다음은 **시스템 로컬 시간 기준 일 단위 회전**, **`yyyy-mm-dd` 파일명**,
+**회전 파일 gzip 압축**을 함께 설정하는 예입니다.
+
+rotalog을 `/usr/local/bin/rotalog`에 설치하고, Tomcat 실행 계정이
+`$CATALINA_BASE/logs`에 쓸 수 있도록 준비합니다. Tomcat을 정지한 상태에서
+`$CATALINA_BASE/bin/setenv.sh`에 다음 내용을 추가한 뒤 다시 기동합니다.
+
+```sh
+# Tomcat이 stdout·stderr를 전달할 입력 FIFO. catalina.sh가 자동 생성합니다.
+export CATALINA_OUT="$CATALINA_BASE/logs/catalina.pipe"
+
+# 아래 명령은 한 줄로 작성합니다. 경로에는 공백을 사용하지 않습니다.
+export CATALINA_OUT_CMD="/usr/local/bin/rotalog -l -f -z -L $CATALINA_BASE/logs/catalina.current $CATALINA_BASE/logs/catalina.out.%Y-%m-%d.log 86400"
+```
+
+- `-l`: 시스템 로컬 시간대의 자정을 기준으로 회전합니다.
+- `-f`: 기동 시 현재 날짜의 로그 파일을 즉시 생성합니다.
+- `-z`: 회전이 끝난 파일을 비동기로 gzip 압축합니다. 압축이 필요 없으면 생략합니다.
+- `-L`: `catalina.current`를 현재 로그 파일에 연결해 날짜와 관계없이 조회할 수 있습니다.
+- `%Y-%m-%d`: `2026-11-12`와 같은 날짜 형식입니다.
+- `86400`: 일 단위 회전 간격입니다. 기동 시각부터 24시간 후가 아니라 날짜 경계에 맞춥니다.
+
+생성되는 파일은 다음과 같습니다.
+
+```text
+logs/catalina.pipe                       # 입력 FIFO, 로그 조회용 파일이 아님
+logs/catalina.out.2026-11-11.log.gz       # 회전 후 압축된 이전 날짜 로그
+logs/catalina.out.2026-11-12.log          # 현재 기록 중인 로그
+logs/catalina.current                    # 현재 로그를 가리키는 링크
+```
+
+입력 FIFO를 `catalina.pipe`로 분리하므로 기존 일반 파일인 `catalina.out`과 충돌하지
+않습니다. 현재 로그는 `tail -F "$CATALINA_BASE/logs/catalina.current"`로 확인합니다.
+현재 기록 중인 파일은 압축하지 않으며, Tomcat 종료 후에도 마지막 파일은 원본으로 남습니다.
+
+기본적으로 자정이 지난 뒤 첫 로그가 들어올 때 다음 날짜 파일로 회전합니다. 로그가 없어도
+날짜별 빈 파일을 만들려면 명령에 `-c`를 추가합니다. 한국 시간으로 회전하려면 Tomcat
+서비스의 시스템 시간대 또는 `TZ` 환경변수를 `Asia/Seoul`로 설정합니다.
+
+이 설정은 `startup.sh` 또는 `catalina.sh start`로 기동할 때 적용됩니다.
+`catalina.sh run`이나 Java를 직접 실행하는 서비스는 stdout·stderr를 rotalog에 전달하는
+구성을 별도로 적용해야 합니다.
+
+Tomcat 9.0.123에서 동일한 연결 방식으로 60초 회전·gzip 압축·정상 종료를 실제 검증했습니다.
+일 단위 예시에서는 회전 간격을 `86400`, 파일명 패턴을 `%Y-%m-%d`로 지정합니다.
 
 ## 원본 CLI 호환성 검증
 
@@ -356,7 +463,7 @@ scripts/bench-vs-apache.sh # 실제 Apache rotatelogs와 비교
 ```sh
 cargo test
 cargo clippy --all-targets -- -D warnings
-cargo fmt --check
+cargo fmt --all --check
 ```
 
 - 단위 테스트 80개: CLI 파싱, 시간 정렬, strftime 검증, 이름 충돌, `-n`/`-t`/`-T`,
