@@ -21,6 +21,8 @@ and this project follows [Semantic Versioning](https://semver.org/).
 - MSRV, dependency audit, and release workflows.
 - English README, security policy, contributing guide, and changelog.
 - Criterion microbenchmarks and a `hyperfine` end-to-end benchmark script.
+- A reproducible comparison against the original Apache `rotatelogs` in
+  `BENCHMARKS.md`.
 
 ### Changed
 
