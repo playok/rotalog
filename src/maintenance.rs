@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -27,11 +27,63 @@ const QUEUE_WARNING_INTERVAL: Duration = Duration::from_secs(5);
 struct Job {
     sequence: u64,
     path: PathBuf,
+    permit: Permit,
 }
 
 struct Completed {
     sequence: u64,
     path: PathBuf,
+    _permit: Permit,
+}
+
+/// A permit follows a file through queued, running and out-of-order completion
+/// states. It is returned only after retention (or when a failed worker drops it).
+#[derive(Debug)]
+struct Permit(Arc<AtomicUsize>);
+
+impl Permit {
+    fn acquire(outstanding: &Arc<AtomicUsize>, limit: usize) -> Option<Self> {
+        let mut count = outstanding.load(Ordering::Relaxed);
+        loop {
+            if count >= limit {
+                return None;
+            }
+            match outstanding.compare_exchange_weak(
+                count,
+                count + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Some(Self(Arc::clone(outstanding))),
+                Err(actual) => count = actual,
+            }
+        }
+    }
+}
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Keep the permit in the reorder map until all earlier files have completed.
+fn complete_in_order(
+    completed: Completed,
+    pending: &mut BTreeMap<u64, Completed>,
+    next: &mut u64,
+    kept: &mut VecDeque<PathBuf>,
+    retain: Option<usize>,
+    verbose: bool,
+) {
+    pending.insert(completed.sequence, completed);
+    while let Some(completed) = pending.remove(next) {
+        if let Some(limit) = retain {
+            retain_path(kept, completed.path, limit, verbose);
+        }
+        *next = next.saturating_add(1);
+        // completed._permit is dropped here, after retention.
+    }
 }
 
 /// Background workers for gzip compression and retention.
@@ -43,6 +95,8 @@ struct Completed {
 pub struct Maintenance {
     sender: Option<Sender<Job>>,
     sequence: Mutex<u64>,
+    outstanding: Arc<AtomicUsize>,
+    outstanding_limit: usize,
     dropped_jobs: AtomicU64,
     last_full_warning: Mutex<Option<Instant>>,
     workers: Vec<JoinHandle<()>>,
@@ -72,23 +126,30 @@ impl Maintenance {
         }
 
         let (sender, receiver) = bounded::<Job>(MAINTENANCE_QUEUE_DEPTH);
+        // Every result owns an admission permit, so this channel plus the
+        // reorder map cannot exceed 16 + compress_jobs accepted files.
         let (completed_tx, completed_rx) = unbounded::<Completed>();
 
         let retention = thread::Builder::new()
             .name("rotalog-retention".to_owned())
             .spawn(move || {
                 let mut kept: VecDeque<PathBuf> = VecDeque::new();
-                let mut pending: BTreeMap<u64, PathBuf> = BTreeMap::new();
+                let mut pending = BTreeMap::new();
                 let mut next = 0_u64;
 
                 while let Ok(completed) = completed_rx.recv() {
-                    pending.insert(completed.sequence, completed.path);
-                    while let Some(path) = pending.remove(&next) {
-                        if let Some(limit) = retain {
-                            retain_path(&mut kept, path, limit, verbose);
-                        }
-                        next = next.saturating_add(1);
+                    if retain.is_none() {
+                        // Compression alone needs neither ordering nor a growing map.
+                        continue;
                     }
+                    complete_in_order(
+                        completed,
+                        &mut pending,
+                        &mut next,
+                        &mut kept,
+                        retain,
+                        verbose,
+                    );
                 }
 
                 if !pending.is_empty() {
@@ -127,6 +188,7 @@ impl Maintenance {
                             .send(Completed {
                                 sequence: job.sequence,
                                 path: final_path,
+                                _permit: job.permit,
                             })
                             .is_err()
                         {
@@ -142,6 +204,8 @@ impl Maintenance {
         Ok(Self {
             sender: Some(sender),
             sequence: Mutex::new(0),
+            outstanding: Arc::new(AtomicUsize::new(0)),
+            outstanding_limit: MAINTENANCE_QUEUE_DEPTH + compress_jobs,
             dropped_jobs: AtomicU64::new(0),
             last_full_warning: Mutex::new(None),
             workers,
@@ -159,31 +223,40 @@ impl Maintenance {
             Err(poisoned) => poisoned.into_inner(),
         };
 
+        let Some(permit) = Permit::acquire(&self.outstanding, self.outstanding_limit) else {
+            self.warn_full();
+            return;
+        };
         match sender.try_send(Job {
             sequence: *sequence,
             path,
+            permit,
         }) {
             Ok(()) => {
                 *sequence = sequence.saturating_add(1);
             }
             Err(TrySendError::Full(_)) => {
-                let dropped = self.dropped_jobs.fetch_add(1, Ordering::Relaxed) + 1;
-                let now = Instant::now();
-                let mut last = match self.last_full_warning.lock() {
-                    Ok(last) => last,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                if last.is_none_or(|last| now.duration_since(last) >= QUEUE_WARNING_INTERVAL) {
-                    eprintln!(
-                        "rotalog: maintenance queue is full; leaving a rotated file \
-                         uncompressed (total dropped: {dropped})"
-                    );
-                    *last = Some(now);
-                }
+                self.warn_full();
             }
             Err(TrySendError::Disconnected(_)) => {
                 eprintln!("rotalog: maintenance workers stopped; rotated file was not queued");
             }
+        }
+    }
+
+    fn warn_full(&self) {
+        let dropped = self.dropped_jobs.fetch_add(1, Ordering::Relaxed) + 1;
+        let now = Instant::now();
+        let mut last = match self.last_full_warning.lock() {
+            Ok(last) => last,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if last.is_none_or(|last| now.duration_since(last) >= QUEUE_WARNING_INTERVAL) {
+            eprintln!(
+                "rotalog: maintenance capacity is full; skipping compression/retention \
+                 for a rotated file (total dropped: {dropped})"
+            );
+            *last = Some(now);
         }
     }
 
@@ -197,7 +270,7 @@ impl Maintenance {
         if dropped > 0 {
             eprintln!(
                 "rotalog: {dropped} rotated files were not compressed/retained because \
-                 the maintenance queue was full"
+                 maintenance capacity was full"
             );
         }
         // Dropping the sender closes the job queue. Workers drain the queued
@@ -353,6 +426,97 @@ fn gzip_temporary_path(destination: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compression_without_retention_finishes_for_each_worker_count() {
+        for jobs in [1, 2, 4] {
+            let dir = tempfile::tempdir().unwrap();
+            let maintenance =
+                Maintenance::spawn(true, 1, ArchiveFsync::Never, None, jobs, false).unwrap();
+            for index in 0..8 {
+                let path = dir.path().join(index.to_string());
+                fs::write(&path, vec![index as u8; 4096]).unwrap();
+                maintenance.retire(path);
+            }
+            maintenance.finish();
+            for index in 0..8 {
+                let file = File::open(dir.path().join(format!("{index}.gz"))).unwrap();
+                let mut decoder = flate2::read::GzDecoder::new(file);
+                let mut data = Vec::new();
+                decoder.read_to_end(&mut data).unwrap();
+                assert_eq!(data, vec![index as u8; 4096]);
+            }
+        }
+    }
+
+    #[test]
+    fn stalled_first_completion_bounds_pending_and_preserves_retention_order() {
+        for jobs in [1, 2, 4] {
+            let limit = MAINTENANCE_QUEUE_DEPTH + jobs;
+            let outstanding = Arc::new(AtomicUsize::new(0));
+            let dir = tempfile::tempdir().unwrap();
+            let mut completed = VecDeque::new();
+            for sequence in 0..limit {
+                let path = dir.path().join(sequence.to_string());
+                fs::write(&path, b"log").unwrap();
+                completed.push_back(Completed {
+                    sequence: sequence as u64,
+                    path,
+                    _permit: Permit::acquire(&outstanding, limit).unwrap(),
+                });
+            }
+            // Model a slow sequence 0 while all later work finishes.
+            let first = completed.pop_front().unwrap();
+            let mut pending = BTreeMap::new();
+            let mut kept = VecDeque::new();
+            let mut next = 0;
+            for item in completed {
+                complete_in_order(item, &mut pending, &mut next, &mut kept, Some(2), false);
+                assert!(Permit::acquire(&outstanding, limit).is_none());
+            }
+            assert_eq!(pending.len(), limit - 1);
+            assert_eq!(fs::read_dir(dir.path()).unwrap().count(), limit);
+            complete_in_order(first, &mut pending, &mut next, &mut kept, Some(2), false);
+            assert!(pending.is_empty());
+            assert_eq!(next, limit as u64);
+            assert_eq!(outstanding.load(Ordering::Relaxed), 0);
+            assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+            assert!(dir.path().join((limit - 1).to_string()).exists());
+            assert!(dir.path().join((limit - 2).to_string()).exists());
+            assert!(Permit::acquire(&outstanding, limit).is_some());
+        }
+    }
+
+    #[test]
+    fn rejected_jobs_release_permits_without_consuming_sequence_numbers() {
+        let (sender, receiver) = bounded(MAINTENANCE_QUEUE_DEPTH);
+        let mut maintenance = Maintenance {
+            sender: Some(sender),
+            sequence: Mutex::new(0),
+            outstanding: Arc::new(AtomicUsize::new(0)),
+            outstanding_limit: MAINTENANCE_QUEUE_DEPTH + 2,
+            dropped_jobs: AtomicU64::new(0),
+            last_full_warning: Mutex::new(None),
+            workers: Vec::new(),
+            retention: None,
+        };
+        for _ in 0..MAINTENANCE_QUEUE_DEPTH + 10 {
+            maintenance.retire(PathBuf::from("unused"));
+        }
+        assert_eq!(
+            maintenance.outstanding.load(Ordering::Relaxed),
+            MAINTENANCE_QUEUE_DEPTH
+        );
+        assert_eq!(
+            *maintenance.sequence.lock().unwrap(),
+            MAINTENANCE_QUEUE_DEPTH as u64
+        );
+        assert_eq!(maintenance.dropped_jobs.load(Ordering::Relaxed), 10);
+        drop(receiver); // A disconnected channel can still own queued jobs.
+        maintenance.retire(PathBuf::from("unused"));
+        maintenance.stop(); // Dropping both channel ends releases queued permits.
+        assert_eq!(maintenance.outstanding.load(Ordering::Relaxed), 0);
+    }
 
     #[test]
     fn compresses_retired_files() {

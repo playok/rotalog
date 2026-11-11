@@ -32,7 +32,7 @@ ErrorLog  "|/usr/local/bin/rotalog /var/log/httpd/error.log 100M"
   큰 로그를 압축하는 동안 httpd 파이프가 멈추지 않습니다.
 - **우아한 종료**: `SIGTERM`/`SIGINT`를 받으면 이미 큐에 들어온 로그를 기록하고
   flush한 뒤 종료 코드 0으로 끝납니다.
-- **안전한 동시성**: stdin 리더 스레드와 단일 writer 스레드가 64 KiB × 64 슬롯의
+- **안전한 동시성**: stdin 리더 스레드와 단일 writer 스레드가 64 KiB × 8 슬롯의
   bounded channel로 연결됩니다. 메모리 사용량이 상한을 가지며 파일 상태에는 락이
   필요 없습니다.
 - **`unsafe` 금지**: 크레이트 전체에 `#![forbid(unsafe_code)]`가 적용되어 있습니다.
@@ -216,12 +216,13 @@ httpd ──stdin──▶ reader thread ──bounded channel──▶ writer t
                                                                               └─▶ retention coordinator
 ```
 
-- 리더는 64 KiB씩 읽어 `sync_channel(64)`로 전달합니다. writer가 느리면 자연스럽게
-  backpressure가 걸리고 메모리는 약 4 MiB로 제한됩니다.
+- 리더는 64 KiB씩 읽어 `crossbeam_channel::bounded(8)`로 전달합니다. writer가 느리면 자연스럽게
+  backpressure가 걸리고 큐 payload는 최대 512 KiB입니다(전체 RSS 상한은 아닙니다).
 - writer만 회전 상태와 파일 핸들을 소유하므로 락이 없습니다.
 - maintenance worker pool은 압축을 병렬로 처리하고, retention coordinator는 회전
-  순서대로 완료된 아카이브만 삭제합니다. 큐는 16개로 제한되며, 큐가 가득 차면 해당
-  회전 파일은 압축하지 않고 남깁니다. 종료 시에는 큐에 남은 작업을 마친 뒤 종료합니다.
+  순서대로 완료된 아카이브만 삭제합니다. 입력 큐는 16개이며, 대기·실행·완료 순서 대기를 합친 전체 작업은
+  `16 + compress-jobs`개로 제한합니다. 큐 또는 전체 용량이 가득 차면 해당
+  회전 파일은 압축/보존 처리 없이 남기고 경고를 집계합니다. 종료 시에는 큐에 남은 작업을 마친 뒤 종료합니다.
 - `SIGTERM`/`SIGINT`는 `signal-hook` 플래그로 전달됩니다. writer는 최대 200 ms 안에
   이를 확인하고, 250 ms grace period 동안 전달 중인 데이터를 흡수한 뒤 정상 종료합니다.
   OS pipe에 아직 읽히지 않은 데이터는 grace period를 넘기면 보장되지 않습니다.
@@ -330,9 +331,9 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-- 단위 테스트 76개: CLI 파싱, 시간 정렬, strftime 검증, 이름 충돌, `-n`/`-t`/`-T`,
+- 단위 테스트 80개: CLI 파싱, 시간 정렬, strftime 검증, 이름 충돌, `-n`/`-t`/`-T`,
   링크, gzip, 보존 정책, DST 경계, 압축 레벨/fsync/worker pool.
-- 통합 테스트 22개 (Linux 기준, macOS 21): 실제 바이너리에 stdin을 공급해 파일 생성,
+- 통합 테스트 24개 (Linux 기준, macOS 23): 실제 바이너리에 stdin을 공급해 파일 생성,
   크기/시간 회전, `-e`, `-L`, `-p`, `-D`, `-f`, `-c`, `-z`/`--retain`, 잘못된 설정,
   SIGTERM 우아한 종료.
 - 원본 CLI 호환성 테스트 5개: 실제 Apache `rotatelogs`와 설정·종료 코드·파일 동작 비교.

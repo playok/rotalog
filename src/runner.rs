@@ -13,7 +13,9 @@ use crate::writer::Writer;
 
 const READ_CHUNK: usize = 64 * 1024;
 const TICK: Duration = Duration::from_millis(200);
-const QUEUE_DEPTH: usize = 64;
+// 512 KiB of queued payload: retain burst buffering without the previous
+// 4 MiB queue. See BENCHMARKS.md for the 4/8/16/64-slot comparison.
+const QUEUE_DEPTH: usize = 8;
 const DRAIN_GRACE: Duration = Duration::from_millis(250);
 
 enum Input {

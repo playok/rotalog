@@ -303,6 +303,14 @@ pub fn unique_path_from(base: &Path, start: u64) -> (PathBuf, u64) {
     unique_path_after(base, start)
 }
 
+/// Avoid a directory scan for the usual case: a fresh timestamp base.
+pub fn unique_path_for_new_base(base: &Path) -> (PathBuf, u64) {
+    if !occupied(base) {
+        return (base.to_path_buf(), 1);
+    }
+    unique_path_after(base, next_suffix(base))
+}
+
 /// Like [`unique_path_from`], but assumes `base` itself is already occupied.
 /// This avoids an extra `stat` when the writer already has a suffix cursor for
 /// the same base name.
@@ -362,6 +370,31 @@ fn occupied(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    #[test]
+    fn fresh_base_fast_path_preserves_collision_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("fresh.log");
+        fs::write(append_suffix(&base, ".9"), b"archive").unwrap();
+        // An absent base is still usable even if old numbered archives exist.
+        assert_eq!(unique_path_for_new_base(&base), (base.clone(), 1));
+        fs::write(&base, b"current").unwrap();
+        assert_eq!(
+            unique_path_for_new_base(&base),
+            (append_suffix(&base, ".10"), 11)
+        );
+        assert_eq!(fs::read(&base).unwrap(), b"current");
+        #[cfg(unix)]
+        {
+            fs::remove_file(&base).unwrap();
+            std::os::unix::fs::symlink(dir.path().join("absent"), &base).unwrap();
+            assert_eq!(
+                unique_path_for_new_base(&base).0,
+                append_suffix(&base, ".10")
+            );
+        }
+    }
 
     #[test]
     fn alignment_uses_floor_division() {

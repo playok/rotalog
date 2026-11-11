@@ -19,7 +19,7 @@ ErrorLog  "|/usr/local/bin/rotalog /var/log/httpd/error.log 100M"
   `-n`, `-v`
 - `strftime` filenames, UTC offsets, local time, and atomic current-log links
 - Asynchronous gzip (`-z`) and retention (`--retain`)
-- Bounded stdin queue, single writer, no `unsafe`
+- Bounded stdin queue (8 × 64 KiB payload), single writer, no `unsafe`
 - Graceful SIGTERM/SIGINT handling with a short drain grace period
 - Same-name rotations never overwrite an existing archive; `.1`, `.2` are used
 - Rotation failures keep writing to the old file and retry with monotonic backoff
@@ -104,7 +104,9 @@ Intentional differences:
   this differs from Apache only on DST transition days.
 - A write failure to the current file exits with status 2; a rotation-open
   failure keeps the old file and retries. The maintenance queue is bounded to
-  16 files; queue-full warnings are rate-limited to once per 5 seconds and a
+  16 files, and total queued/running/completed work is capped at
+  `16 + compress-jobs` files. Saturation skips compression/retention for that
+  file; capacity-full warnings are rate-limited to once per 5 seconds and a
   total is logged at shutdown. Compression can run on multiple workers, and
   retention is applied in rotation order. SIGTERM gives in-flight data a short
   drain grace period.
@@ -141,8 +143,8 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-- 76 unit tests
-- 22 integration tests on Linux (21 on macOS, including one Linux-only
+- 80 unit tests
+- 24 integration tests on Linux (23 on macOS, including one Linux-only
   write-failure test)
 - 5 differential compatibility tests (51-case argv matrix plus malformed,
   extension, oracle-identity, and behavior checks)

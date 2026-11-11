@@ -114,10 +114,40 @@ fn size_rotations(c: &mut Criterion) {
     group.finish();
 }
 
+// Compare the previous directory scan with the fresh-base fast path. The base
+// stays absent so each iteration represents a new timestamp name.
+fn fresh_size_base(c: &mut Criterion) {
+    use rotalog::naming;
+    let mut group = c.benchmark_group("naming/fresh_size_base");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(2));
+    for count in [0, 10_000] {
+        let dir = TempDir::new().unwrap();
+        for index in 0..count {
+            std::fs::write(dir.path().join(format!("archive.{index}")), b"").unwrap();
+        }
+        let base = dir.path().join("fresh.log");
+        group.bench_function(BenchmarkId::new("scan_first", count), |b| {
+            b.iter(|| {
+                let start = naming::next_suffix(black_box(&base));
+                black_box(naming::unique_path_from(&base, start));
+            })
+        });
+        group.bench_function(BenchmarkId::new("check_first", count), |b| {
+            b.iter(|| {
+                black_box(naming::unique_path_for_new_base(black_box(&base)));
+            })
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     write_chunks,
     line_sized_file_writes,
-    size_rotations
+    size_rotations,
+    fresh_size_base
 );
 criterion_main!(benches);
