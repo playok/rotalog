@@ -111,6 +111,16 @@ Level 1 is the fastest, level 3 is the default balance, and 6-9 are useful when
 archive size matters more than CPU. Wall time also depends on fsync and storage;
 the table is illustrative rather than a strict benchmark.
 
+`--fsync-archives always|data|never` controls the archive durability barrier.
+`always` (default) calls `sync_all`, `data` calls `sync_data`, and `never` skips
+fsync. The last two can improve throughput on slow storage but weaken crash
+durability; `scripts/bench.sh` includes a `never` comparison.
+
+A local smoke run on a 64 MiB mixed log with 32 MiB rotation showed roughly
+0.47 s for `always` vs 0.18 s for `data`/`never`, with user time unchanged at
+about 0.14 s. This illustrates that fsync can dominate wall time; it is not a
+substitute for repeated measurements on the target storage.
+
 ## Benchmarking policy
 
 - Add or update a benchmark for every performance-sensitive change.

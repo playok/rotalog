@@ -1,7 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-use crate::config::{Config, MAX_OFFSET_MINUTES, Rotation};
+use crate::config::{ArchiveFsync, Config, MAX_OFFSET_MINUTES, Rotation};
 use crate::error::{Error, Result};
 
 pub const HELP: &str = r#"rotalog - rotating log writer for Apache httpd and other pipes
@@ -34,6 +34,8 @@ Data flow and maintenance:
 Extensions over Apache rotatelogs:
   -z, --compress            Gzip rotated files asynchronously
       --compress-level <1-9> Gzip level for -z (default 3)
+      --fsync-archives <always|data|never>
+                            Archive fsync policy for -z (default always)
       --retain <count>      Keep only the newest <count> rotated files
 
 Other:
@@ -149,6 +151,10 @@ where
             "compress-level" => {
                 let value = self.take_value("--compress-level", inline)?;
                 self.cfg.compress_level = Some(parse_compress_level(&value)?);
+            }
+            "fsync-archives" => {
+                let value = self.take_value("--fsync-archives", inline)?;
+                self.cfg.archive_fsync = Some(parse_archive_fsync(&value)?);
             }
             "link" => {
                 let value = self.take_value("--link", inline)?;
@@ -404,6 +410,17 @@ fn parse_compress_level(value: &OsStr) -> Result<u8> {
     Ok(level)
 }
 
+fn parse_archive_fsync(value: &OsStr) -> Result<ArchiveFsync> {
+    match value.to_str() {
+        Some("always") => Ok(ArchiveFsync::Always),
+        Some("data") => Ok(ArchiveFsync::Data),
+        Some("never") => Ok(ArchiveFsync::Never),
+        _ => Err(Error::usage(
+            "--fsync-archives must be one of: always, data, never",
+        )),
+    }
+}
+
 fn is_option(arg: &OsStr) -> bool {
     let bytes = arg.as_encoded_bytes();
     bytes.len() > 1 && bytes[0] == b'-'
@@ -507,6 +524,8 @@ mod tests {
             "--compress",
             "--compress-level",
             "1",
+            "--fsync-archives",
+            "data",
             "access.%Y%m%d.log",
             "5M",
         ])
@@ -516,6 +535,7 @@ mod tests {
         assert_eq!(config.retain, Some(14));
         assert!(config.compress);
         assert_eq!(config.compress_level, Some(1));
+        assert_eq!(config.archive_fsync, Some(ArchiveFsync::Data));
     }
 
     #[test]
@@ -524,6 +544,13 @@ mod tests {
         assert!(parse_args(&["-z", "--compress-level=3", "access.log", "60"]).is_ok());
         assert!(parse_args(&["-z", "--compress-level=0", "access.log", "60"]).is_err());
         assert!(parse_args(&["-z", "--compress-level=10", "access.log", "60"]).is_err());
+    }
+
+    #[test]
+    fn archive_fsync_requires_compress_and_valid_value() {
+        assert!(parse_args(&["--fsync-archives", "never", "access.log", "60"]).is_err());
+        assert!(parse_args(&["-z", "--fsync-archives=never", "access.log", "60"]).is_ok());
+        assert!(parse_args(&["-z", "--fsync-archives=sometimes", "access.log", "60"]).is_err());
     }
 
     #[test]

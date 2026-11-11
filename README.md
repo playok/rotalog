@@ -93,6 +93,7 @@ rotalog [OPTIONS] <logfile> <rotationtime|filesize> [<filesize>] [<offset>]
 | --- | --- |
 | `-z`, `--compress` | 회전된 파일을 백그라운드에서 gzip 압축 (`*.gz`) |
 | `--compress-level <1-9>` | `-z`의 gzip 레벨. 기본 3 (1=빠름, 6~9=작은 파일) |
+| `--fsync-archives <always\|data\|never>` | 압축 아카이브 fsync 정책. 기본 `always` |
 | `--retain <count>` | 이 프로세스가 만든 회전 파일을 최신 `count`개만 남김 |
 
 제약:
@@ -104,6 +105,9 @@ rotalog [OPTIONS] <logfile> <rotationtime|filesize> [<filesize>] [<offset>]
   비동기 프로그램과 압축/삭제 작업의 경쟁 조건을 막기 위한 제약입니다.
 - `--compress-level`은 `-z`와 함께만 사용할 수 있습니다. 기본값은 3이며, 1은
   가장 빠르고 6~9는 더 작은 아카이브를 만듭니다.
+- `--fsync-archives`는 `-z`와 함께만 사용할 수 있습니다. `always`(기본)는
+  `sync_all`, `data`는 `sync_data`, `never`는 fsync를 생략합니다. `data`/`never`는
+  크래시·전원 손실 시 아카이브 durability 보장이 약해집니다.
 - `-c`는 시간 간격이 있을 때만 효과가 있습니다. 크기 전용 구성에서도 원본처럼
   옵션은 허용되지만 빈 파일을 만들지 않습니다. 첫 빈 파일은 시작 후 한 interval이
   지난 뒤부터 생성됩니다.
@@ -318,8 +322,8 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-- 단위 테스트 69개: CLI 파싱, 시간 정렬, strftime 검증, 이름 충돌, `-n`/`-t`/`-T`,
-  링크, gzip, 보존 정책, DST 경계, 압축 레벨.
+- 단위 테스트 70개: CLI 파싱, 시간 정렬, strftime 검증, 이름 충돌, `-n`/`-t`/`-T`,
+  링크, gzip, 보존 정책, DST 경계, 압축 레벨/fsync.
 - 통합 테스트 21개 (Linux 전용 write-failure 테스트 1개 포함): 실제 바이너리에
   stdin을 공급해 파일 생성, 크기/시간 회전, `-e`, `-L`, `-p`, `-D`, `-f`, `-c`,
   `-z`/`--retain`, 잘못된 설정, SIGTERM 우아한 종료.

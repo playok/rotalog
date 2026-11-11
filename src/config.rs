@@ -11,6 +11,28 @@ pub const MAX_OFFSET_MINUTES: i32 = 14 * 60;
 /// level 1 is fastest and 6-9 produce smaller archives.
 pub const DEFAULT_COMPRESS_LEVEL: u8 = 3;
 
+/// Durability policy for compressed archives before the source file is removed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ArchiveFsync {
+    /// Flush data and metadata with `sync_all` (current/default behavior).
+    #[default]
+    Always,
+    /// Flush file data with `sync_data` only.
+    Data,
+    /// Do not call fsync; rely on the OS page cache.
+    Never,
+}
+
+impl ArchiveFsync {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Always => "always",
+            Self::Data => "data",
+            Self::Never => "never",
+        }
+    }
+}
+
 /// Rotation limits. Time and size may be combined; whichever is reached first
 /// wins.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -59,6 +81,8 @@ pub struct Config {
     pub compress: bool,
     /// Optional gzip level (1-9). `None` uses [`DEFAULT_COMPRESS_LEVEL`].
     pub compress_level: Option<u8>,
+    /// Optional archive fsync policy. `None` uses [`ArchiveFsync::Always`].
+    pub archive_fsync: Option<ArchiveFsync>,
     /// Keep at most this many rotated files created by this process.
     pub retain: Option<usize>,
 }
@@ -76,6 +100,11 @@ impl Config {
     /// Effective gzip level, including the default when `-z` is enabled.
     pub fn effective_compress_level(&self) -> u8 {
         self.compress_level.unwrap_or(DEFAULT_COMPRESS_LEVEL)
+    }
+
+    /// Effective archive fsync policy.
+    pub fn effective_archive_fsync(&self) -> ArchiveFsync {
+        self.archive_fsync.unwrap_or_default()
     }
 
     /// Check invariants that are independent of argument order.
@@ -147,6 +176,9 @@ impl Config {
             if !self.compress {
                 return Err(Error::usage("--compress-level requires -z/--compress"));
             }
+        }
+        if self.archive_fsync.is_some() && !self.compress {
+            return Err(Error::usage("--fsync-archives requires -z/--compress"));
         }
         if self.retain.is_some() {
             if self.circular.is_some() {
@@ -232,6 +264,14 @@ impl Config {
             "  compression level:    {}",
             if self.compress {
                 self.effective_compress_level().to_string()
+            } else {
+                "n/a".to_owned()
+            }
+        );
+        eprintln!(
+            "  archive fsync:        {}",
+            if self.compress {
+                self.effective_archive_fsync().as_str().to_owned()
             } else {
                 "n/a".to_owned()
             }
@@ -365,6 +405,7 @@ mod tests {
     #[test]
     fn compression_level_requires_compress_and_valid_range() {
         let mut config = base();
+        assert_eq!(config.effective_archive_fsync(), ArchiveFsync::Always);
         config.compress_level = Some(3);
         assert!(config.validate().is_err());
 
@@ -379,6 +420,13 @@ mod tests {
 
         config.compress_level = None;
         assert_eq!(config.effective_compress_level(), DEFAULT_COMPRESS_LEVEL);
+
+        config.compress = false;
+        config.archive_fsync = Some(ArchiveFsync::Never);
+        assert!(config.validate().is_err());
+        config.compress = true;
+        config.validate().unwrap();
+        assert_eq!(config.effective_archive_fsync(), ArchiveFsync::Never);
     }
 
     #[test]
