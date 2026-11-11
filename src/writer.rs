@@ -73,6 +73,7 @@ impl Writer {
                 Maintenance::spawn(
                     cfg.compress,
                     cfg.effective_compress_level(),
+                    cfg.effective_archive_fsync(),
                     cfg.retain,
                     cfg.verbose,
                 )

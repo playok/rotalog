@@ -9,6 +9,8 @@ use std::thread::{self, JoinHandle};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 
+use crate::config::ArchiveFsync;
+
 static TEMPORARY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Bound the number of rotated files waiting for compression. When the queue
@@ -39,6 +41,7 @@ impl Maintenance {
     pub fn spawn(
         compress: bool,
         compress_level: u8,
+        archive_fsync: ArchiveFsync,
         retain: Option<usize>,
         verbose: bool,
     ) -> io::Result<Self> {
@@ -58,7 +61,7 @@ impl Maintenance {
                     match job {
                         Job::Retire(path) => {
                             let final_path = if compress {
-                                match compress_file(&path, compress_level, verbose) {
+                                match compress_file(&path, compress_level, archive_fsync, verbose) {
                                     Ok(compressed) => compressed,
                                     Err(error) => {
                                         eprintln!(
@@ -146,7 +149,12 @@ impl Drop for Maintenance {
     }
 }
 
-fn compress_file(source: &Path, level: u8, verbose: bool) -> io::Result<PathBuf> {
+fn compress_file(
+    source: &Path,
+    level: u8,
+    archive_fsync: ArchiveFsync,
+    verbose: bool,
+) -> io::Result<PathBuf> {
     let destination = gzip_path(source);
     let (temporary, output) = open_temporary(&destination)?;
 
@@ -167,9 +175,13 @@ fn compress_file(source: &Path, level: u8, verbose: bool) -> io::Result<PathBuf>
 
         let mut output = encoder.finish()?;
         output.flush()?;
-        // The original is removed below; make sure the archive is durable
-        // before that happens.
-        output.get_ref().sync_all()?;
+        // The original is removed below; respect the configured durability
+        // policy before that happens.
+        match archive_fsync {
+            ArchiveFsync::Always => output.get_ref().sync_all()?,
+            ArchiveFsync::Data => output.get_ref().sync_data()?,
+            ArchiveFsync::Never => {}
+        }
         drop(output);
 
         #[cfg(unix)]
@@ -261,8 +273,14 @@ mod tests {
         let first = dir.path().join("access.log.1");
         fs::write(&first, b"hello world").unwrap();
 
-        let maintenance =
-            Maintenance::spawn(true, crate::config::DEFAULT_COMPRESS_LEVEL, None, false).unwrap();
+        let maintenance = Maintenance::spawn(
+            true,
+            crate::config::DEFAULT_COMPRESS_LEVEL,
+            ArchiveFsync::Always,
+            None,
+            false,
+        )
+        .unwrap();
         maintenance.retire(first.clone());
         maintenance.finish();
 
@@ -287,9 +305,14 @@ mod tests {
             })
             .collect();
 
-        let maintenance =
-            Maintenance::spawn(false, crate::config::DEFAULT_COMPRESS_LEVEL, Some(2), false)
-                .unwrap();
+        let maintenance = Maintenance::spawn(
+            false,
+            crate::config::DEFAULT_COMPRESS_LEVEL,
+            ArchiveFsync::Always,
+            Some(2),
+            false,
+        )
+        .unwrap();
         for path in &paths {
             maintenance.retire(path.clone());
         }
@@ -326,8 +349,14 @@ mod tests {
         fs::write(&source, b"hello").unwrap();
         fs::set_permissions(&source, fs::Permissions::from_mode(0o4755)).unwrap();
 
-        let maintenance =
-            Maintenance::spawn(true, crate::config::DEFAULT_COMPRESS_LEVEL, None, false).unwrap();
+        let maintenance = Maintenance::spawn(
+            true,
+            crate::config::DEFAULT_COMPRESS_LEVEL,
+            ArchiveFsync::Always,
+            None,
+            false,
+        )
+        .unwrap();
         maintenance.retire(source.clone());
         maintenance.finish();
 

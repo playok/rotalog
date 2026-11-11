@@ -79,6 +79,7 @@ Extensions over Apache rotatelogs:
 | --- | --- |
 | `-z`, `--compress` | Gzip rotated files in the background |
 | `--compress-level <1-9>` | Gzip level for `-z`; default 3 (1=fast, 6-9=smaller) |
+| `--fsync-archives <always\|data\|never>` | Archive fsync policy; default `always` |
 | `--retain <count>` | Keep only the newest `count` archives from this process |
 
 ## Compatibility and Differences
@@ -106,7 +107,9 @@ Intentional differences:
 `-p` cannot be combined with `-z`/`--retain` because the post-rotate program may
 read the previous file asynchronously. `-z` is also incompatible with `-t`,
 `-T`, and `-n`. `--compress-level` requires `-z`; the default is 3, with 1 for
-speed and 6-9 for smaller archives.
+speed and 6-9 for smaller archives. `--fsync-archives` also requires `-z`:
+`always` (default) uses `sync_all`, `data` uses `sync_data`, and `never` skips
+fsync at the cost of crash durability.
 
 ## Performance Benchmarks
 
@@ -128,7 +131,7 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-- 69 unit tests
+- 70 unit tests
 - 21 integration tests (including one Linux-only write-failure test)
 - 5 differential compatibility tests (51-case argv matrix plus malformed,
   extension, oracle-identity, and behavior checks)

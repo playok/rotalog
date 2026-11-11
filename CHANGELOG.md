@@ -10,6 +10,8 @@ and this project follows [Semantic Versioning](https://semver.org/).
 ### Added
 
 - `--compress-level <1-9>` for tuning gzip speed/size; default 3.
+- `--fsync-archives <always|data|never>` for archive durability/throughput;
+  default `always`.
 - 128 KiB compression buffers and a manual copy loop.
 - Bounded maintenance queue with explicit queue-full behavior.
 - Single post-rotate reaper thread.
