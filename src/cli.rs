@@ -6,65 +6,171 @@ use crate::config::{
 };
 use crate::error::{Error, Result};
 
-pub const HELP: &str = r#"rotalog - rotating log writer for Apache httpd and other pipes
+pub const HELP: &str = concat!(
+    r#"rotalog - rotating log writer for Apache httpd, Tomcat, and other pipes
 
 Usage:
   rotalog [OPTIONS] <logfile> <rotationtime|filesize> [<filesize>] [<offset>]
 
-The logfile is a path or an strftime(3) pattern. A pattern is detected when the
-path contains '%'. Rotation can be time-based, size-based, or both. File sizes
-must use an uppercase B, K, M or G suffix (for example 5M).
-
-Options must appear before the logfile, matching Apache's POSIX getopt parsing.
-Use '--' to end option parsing.
-
-Rotation and naming:
-  -l, --local-time          Use local time instead of UTC for alignment/names
-  -L, --link <path>         Point <path> at the current logfile (atomic update)
-  -n, --circular <count>    Use circular names: base, base.1, ... base.N-1
-  -t, --truncate            Truncate the logfile instead of rotating it
-  -T, --truncate-rotated    Truncate rotated targets when they are re-opened
-  -c, --create-empty        Create a file for each interval, even if empty
-  -f, --force               Open the first logfile immediately
-
-Data flow and maintenance:
-  -e, --echo                Echo log data to stdout as well
-      --echo-flush <immediate|buffered>
-                            Echo flush policy (default immediate)
-  -p, --program <path>      Run <path> with the new (and previous) filename
-  -D, --create-dirs         Create missing parent directories
-  -v, --verbose             Print configuration and file operations on stderr
-
-Extensions over Apache rotatelogs:
-  -z, --compress            Gzip rotated files asynchronously
-      --compress-level <1-9> Gzip level for -z (default 3)
-      --compress-jobs <N>   Parallel compression workers (default 1)
-      --fsync-archives <always|data|never>
-                            Archive fsync policy for -z (default always)
-      --retain <count>      Keep only the newest <count> rotated files
-
-Other:
-  -h, --help                Show this help
-  -V, --version             Show the version
+Read stdin and write log files until EOF or SIGTERM/SIGINT. Rotation can be
+based on time, size, or both. Options MUST precede the logfile; arguments after
+it are positional values, not options. Use '--' to end option parsing.
 
 Arguments:
-  logfile                   Output path or strftime(3) pattern
-  rotationtime              Seconds between rotations (integer)
-  filesize                  Maximum size, with B/K/M/G suffix (for example 5M)
-  offset                    Minutes east of UTC (-840..=840)
+  logfile
+      Output path or strftime pattern (detected by '%'). Without a pattern,
+      append the rotation interval's adjusted Unix timestamp to the path.
+      Relative paths use the process working directory. Parent directories
+      must exist unless -D is set. Date patterns must be valid UTF-8.
+
+  rotationtime
+      Positive integer interval in seconds: 60 = minute, 3600 = hour,
+      86400 = day. Intervals align to time boundaries, not startup time.
+      By default, time rotation happens on the first write after a boundary;
+      use -c to create files even without input.
+
+  filesize
+      Positive size with an UPPERCASE B/K/M/G suffix, such as 512K or 100M.
+      K/M/G are powers of 1024. Lowercase units are rejected.
+      Combine time and size as: logfile 86400 100M. Rotate when either limit
+      is reached. Rotation is checked before each write; a single input chunk
+      larger than the limit is still written whole.
+
+  offset
+      Fixed minutes east of UTC, from -840 to 840; default 0 (UTC).
+      Examples: 540 = UTC+09:00, -300 = UTC-05:00. Put this argument last.
+      Cannot be combined with -l/--local-time.
+
+Rotation and naming:
+  -l, --local-time
+      Use the system local time zone for interval boundaries and filenames
+      instead of UTC. Daily/hourly boundaries follow local civil time and DST.
+      This uses the process/system time zone, not Tomcat's JVM time-zone flag.
+
+  -L, --link <path>
+      Atomically update <path> to point at the current log after opening it.
+      Prefer a hard link; fall back to a symbolic link if needed. The link path
+      must differ from the logfile. Follow it with: tail -F <path>.
+
+  -n, --circular <count>
+      Use a positive number of circular slots: base, base.1, ... base.N-1.
+      Start by appending to base; truncate slots when reused on later rotations.
+      Cannot use a strftime logfile pattern, -z, or --retain.
+
+  -t, --truncate
+      Truncate the target at each rotation instead of preserving old contents.
+      A literal path is reused; strftime patterns still expand normally.
+      Takes precedence over -T and -n. Cannot use -z or --retain.
+
+  -T, --truncate-rotated
+      Truncate a target when opened for a later rotation, but append to the
+      initial file. Cannot use -z or --retain. Ignored when -t is set.
+
+  -c, --create-empty
+      Create files at time boundaries even if no log data arrives.
+      Without -f, wait one full interval before creating the first empty file.
+      With -f, open the initial file immediately, then follow time boundaries.
+      Accepted but has no effect for size-only rotation.
+
+  -f, --force
+      Open the initial log immediately at startup instead of waiting for input.
+      Useful for checking the path and permissions before the first log write.
+
+Data flow and diagnostics:
+  -e, --echo
+      Copy input to stdout as well as the logfile. Default: file output only.
+      A stdout write failure (including a broken pipe) disables echo only;
+      file logging continues. A slow stdout consumer can delay log processing.
+
+      --echo-flush <immediate|buffered>
+      Requires -e/--echo. Default: immediate, flushing stdout after every chunk.
+      buffered batches up to 64 KiB or flushes on a write after 100 ms elapsed.
+      Idle flushes are checked by the 200 ms housekeeping timer. Pending echo
+      is also flushed on rotation and shutdown.
+
+  -p, --program <path>
+      Start a program after each new file is opened. Arguments are the new
+      filename, followed by the previous filename when one exists.
+      Executed directly, without a shell; use a wrapper for extra arguments
+      or pipelines. Inherits stdin/stdout/stderr; avoid reading its stdin,
+      which can consume the logging pipe. Cannot use -z or --retain.
+
+  -D, --create-dirs
+      Create missing parent directories for logfile and link paths, including
+      directories expanded from date patterns. Default: do not create them.
+
+  -v, --verbose
+      Print effective configuration and file open/rotation/link/compression
+      operations to stderr. Log contents are not echoed unless -e is also set.
+
+Compression and retention (extensions over Apache rotatelogs):
+  -z, --compress
+      Gzip retired files asynchronously, adding .gz and removing the original
+      after successful compression. The active file stays uncompressed, even
+      at shutdown. Default: disabled. Cannot use -t, -T, -n, or -p.
+      If maintenance capacity is full, leave that file uncompressed/unretained
+      and report the skipped work. Shutdown waits for accepted jobs to finish.
+
+      --compress-level <1-9>
+      Requires -z/--compress. Default: 3. Level 1 favors speed; levels 6-9
+      favor smaller archives at a higher CPU cost.
+
+      --compress-jobs <N>
+      Requires -z/--compress. Range: 1-32; default: 1 worker.
+      More workers can reduce compression backlog but use more CPU/memory.
+      Retention is applied in rotation order, not worker completion order.
+
+      --fsync-archives <always|data|never>
+      Requires -z/--compress. Default: always.
+      always: sync_all on the archive before removing the original.
+      data:   sync_data before removing the original.
+      never:  skip fsync and rely on the OS page cache.
+      data/never weaken durability guarantees for crashes or power loss.
+
+      --retain <count>
+      Keep only the newest <count> retired files tracked by this process.
+      The active file is excluded; 0 removes all retired files.
+      Does not scan archives from previous runs. Can be used without -z.
+      Default: no retention limit. Cannot use -n, -t, -T, or -p.
+
+Other:
+  -h, --help
+      Show this detailed help and exit successfully without opening log files.
+
+  -V, --version
+      Show the version and exit.
+
+Date patterns:
+  %Y = year, %m = month, %d = day; %H = hour, %M = minute, %S = second.
+  Daily example: catalina.out.%Y-%m-%d.log -> catalina.out.2026-11-12.log
+  Hourly example: access.%Y-%m-%d_%H.log. Use %% for a literal percent sign.
+  The pattern does not set the interval; specify 86400/3600/60 separately.
+  Coarse patterns use .1, .2 suffixes to preserve files on name collisions.
 
 Exit status:
-  0  success
-  1  invalid usage
+  0  clean shutdown (stdin EOF or SIGTERM/SIGINT)
+  1  invalid command line or configuration
   2  runtime or I/O failure
 
 Examples:
+  # Daily rotation, UTC
   rotalog /var/log/access.log 86400
-  rotalog -l /var/log/access.%Y-%m-%d.log 86400
+  # Daily Tomcat stdout/stderr pipe: local date, gzip, current-log link
+  rotalog -l -f -z -L /var/log/tomcat/catalina.current /var/log/tomcat/catalina.out.%Y-%m-%d.log 86400
+  # Time and size limits, with a fixed UTC offset
   rotalog /var/log/access.log 3600 5M -300
+  # Seven circular files
   rotalog -n 7 /var/log/access.log 86400
-  rotalog -z --retain 14 /var/log/access.%Y%m%d.log 5M
-"#;
+  # Gzip and keep the newest 14 archives created by this process
+  rotalog -z --retain 14 /var/log/access.%Y%m%d.log 86400
+
+"#,
+    "Author: ",
+    env!("CARGO_PKG_AUTHORS"),
+    "\nProject: ",
+    env!("CARGO_PKG_REPOSITORY"),
+    "\n",
+);
 
 #[derive(Debug)]
 pub enum Invocation {

@@ -537,9 +537,58 @@ fn write_failure_exits_with_status_2() {
 
 #[test]
 fn help_and_version_exit_successfully() {
-    let output = run(&["--help"], b"");
-    assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("Usage:"));
+    let mut previous_help = None;
+    for flag in ["-h", "--help"] {
+        let output = run(&[flag], b"");
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty(), "help must be printed to stdout");
+        let help = String::from_utf8(output.stdout).unwrap();
+        for option in [
+            "--local-time",
+            "--link",
+            "--circular",
+            "--truncate",
+            "--truncate-rotated",
+            "--create-empty",
+            "--force",
+            "--echo",
+            "--echo-flush",
+            "--program",
+            "--create-dirs",
+            "--verbose",
+            "--compress",
+            "--compress-level",
+            "--compress-jobs",
+            "--fsync-archives",
+            "--retain",
+            "--help",
+            "--version",
+        ] {
+            assert!(help.contains(option), "missing help for {option}");
+        }
+        for detail in [
+            "Usage:",
+            "Date patterns:",
+            "Exit status:",
+            "Examples:",
+            "Requires -e/--echo",
+            "Range: 1-32; default: 1 worker",
+            "Does not scan archives from previous runs",
+            "data/never weaken durability",
+            "catalina.out.%Y-%m-%d.log",
+            "Author: playok",
+            "Project: https://github.com/playok/rotalog",
+        ] {
+            assert!(help.contains(detail), "missing help detail: {detail}");
+        }
+        if let Some(previous) = previous_help {
+            assert_eq!(
+                help, previous,
+                "-h and --help must provide the same details"
+            );
+        }
+        previous_help = Some(help);
+    }
 
     let output = run(&["--version"], b"");
     assert!(output.status.success());
