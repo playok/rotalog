@@ -57,8 +57,8 @@ not currently provided. Archives contain `rotalog`, the license and READMEs.
 
 ```sh
 # Download the matching archive and checksum from GitHub Releases first.
-shasum -a 256 -c rotalog-v0.1.0-x86_64-unknown-linux-musl.tar.gz.sha256
-tar -xzf rotalog-v0.1.0-x86_64-unknown-linux-musl.tar.gz
+shasum -a 256 -c rotalog-v0.1.1-x86_64-unknown-linux-musl.tar.gz.sha256
+tar -xzf rotalog-v0.1.1-x86_64-unknown-linux-musl.tar.gz
 sudo install -m 0755 rotalog /usr/local/bin/rotalog
 ```
 

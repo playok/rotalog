@@ -56,8 +56,8 @@ Linux 빌드는 musl 정적 링크로 glibc 버전 의존성을 제거합니다.
 
 ```sh
 # OS/CPU에 맞는 파일과 .sha256을 GitHub Releases에서 내려받은 후:
-shasum -a 256 -c rotalog-v0.1.0-x86_64-unknown-linux-musl.tar.gz.sha256
-tar -xzf rotalog-v0.1.0-x86_64-unknown-linux-musl.tar.gz
+shasum -a 256 -c rotalog-v0.1.1-x86_64-unknown-linux-musl.tar.gz.sha256
+tar -xzf rotalog-v0.1.1-x86_64-unknown-linux-musl.tar.gz
 sudo install -m 0755 rotalog /usr/local/bin/rotalog
 ```
 
